@@ -159,15 +159,18 @@ impl RingWriter {
         if payload.len() + 4 > self.ring_cap {
             return Err(IpcError::TooLarge);
         }
-        
-        debug_assert!(self.ring_cap.is_power_of_two(), "ring_cap must be power of 2");
+
+        debug_assert!(
+            self.ring_cap.is_power_of_two(),
+            "ring_cap must be power of 2"
+        );
         debug_assert_eq!(self.mask, self.ring_cap - 1, "mask must equal ring_cap - 1");
 
         let hdr = unsafe { &*self.hdr };
         let read = hdr.read.load(Ordering::Acquire);
         let mut cur_write = hdr.write.load(Ordering::Relaxed);
-    let used = cur_write - read;
-    let space = self.ring_cap as u64 - used;
+        let used = cur_write - read;
+        let space = self.ring_cap as u64 - used;
         let need = align_up(payload.len() + 4, 4) as u64;
 
         if space < need {
@@ -195,7 +198,7 @@ impl RingWriter {
                 .set(EventState::Signaled)
                 .map_err(|e| IpcError::Event(to_send_sync_error(e)));
 
-            w = 0;  // After wrap marker, next write starts at beginning
+            w = 0; // After wrap marker, next write starts at beginning
         }
 
         // Write header (no READY), copy payload, then publish (set READY)
@@ -233,7 +236,12 @@ impl RingWriter {
     #[inline]
     fn write_header(&mut self, w: usize, len: u32) {
         let pos = w & self.mask;
-        debug_assert!(pos < self.ring_cap, "write position {} >= ring_cap {}", pos, self.ring_cap);
+        debug_assert!(
+            pos < self.ring_cap,
+            "write position {} >= ring_cap {}",
+            pos,
+            self.ring_cap
+        );
         let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
         unsafe {
             (&*p).store(len, Ordering::Relaxed);
@@ -243,7 +251,12 @@ impl RingWriter {
     fn publish_header(&mut self, w: usize, len: u32) {
         fence(Ordering::Release);
         let pos = w & self.mask;
-        debug_assert!(pos < self.ring_cap, "publish position {} >= ring_cap {}", pos, self.ring_cap);
+        debug_assert!(
+            pos < self.ring_cap,
+            "publish position {} >= ring_cap {}",
+            pos,
+            self.ring_cap
+        );
         let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
         unsafe {
             (&*p).store(len | READY, Ordering::Release);
@@ -273,9 +286,9 @@ impl RingWriter {
                 ptr::copy_nonoverlapping(zeros.as_ptr(), self.ring_ptr.add(pad_start), first_pad);
                 if first_pad < pad {
                     ptr::copy_nonoverlapping(
-                        zeros.as_ptr().add(first_pad), 
-                        self.ring_ptr, 
-                        pad - first_pad
+                        zeros.as_ptr().add(first_pad),
+                        self.ring_ptr,
+                        pad - first_pad,
                     );
                 }
             }

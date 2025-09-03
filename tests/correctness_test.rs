@@ -44,7 +44,10 @@ fn test_streaming_correctness_small_capacity() {
             let mut id = [0u8; 8];
             id.copy_from_slice(&buf[0..8]);
             let got = u64::from_le_bytes(id) as usize;
-            assert_eq!(got, expected_seq, "out of order or drop: got {got} expected {expected_seq}");
+            assert_eq!(
+                got, expected_seq,
+                "out of order or drop: got {got} expected {expected_seq}"
+            );
         }
     });
 
@@ -86,7 +89,10 @@ fn test_wrap_marker_path_is_consumed() {
             let mut id = [0u8; 8];
             id.copy_from_slice(&buf[0..8]);
             let got = u64::from_le_bytes(id) as usize;
-            assert_eq!(got, expected_seq, "wrap marker traversal failed: got {got} expected {expected_seq}");
+            assert_eq!(
+                got, expected_seq,
+                "wrap marker traversal failed: got {got} expected {expected_seq}"
+            );
         }
     });
 
