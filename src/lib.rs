@@ -8,7 +8,7 @@
 use memmap2::{MmapMut, MmapOptions};
 use raw_sync::events::{EventInit, EventState};
 use raw_sync::Timeout;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io;
 use std::mem::{align_of, size_of};
 use std::os::unix::fs::OpenOptionsExt;
@@ -39,7 +39,9 @@ struct Header {
 // Layout in the mapping:
 // [Header][Event(data_avail)][Event(space_avail)][padding to 64B][Ring bytes...]
 pub struct RingWriter {
-    file: File,
+    // Own the mmap to guarantee the ring_ptr stays valid (we keep a raw pointer into it).
+    // We never read this field directly, but it must be owned so Drop unmaps it.
+    #[allow(dead_code)]
     map: MmapMut,
     hdr: *mut Header,
     data_avail: Box<dyn raw_sync::events::EventImpl>,
@@ -50,7 +52,9 @@ pub struct RingWriter {
 }
 
 pub struct RingReader {
-    file: File,
+    // Own the mmap to guarantee the ring_ptr stays valid (we keep a raw pointer into it).
+    // We never read this field directly, but it must be owned so Drop unmaps it.
+    #[allow(dead_code)]
     map: MmapMut,
     hdr: *mut Header,
     data_avail: Box<dyn raw_sync::events::EventImpl>,
@@ -109,10 +113,12 @@ impl RingWriter {
         file.set_len(layout as u64)?;
 
         let map = unsafe { MmapOptions::new().len(layout).map_mut(&file)? };
-        unsafe { Self::init_mapping(file, map, cap_pow2) }
+        // `file` can be dropped after mapping; mapping remains valid until unmapped.
+        drop(file);
+        unsafe { Self::init_mapping(map, cap_pow2) }
     }
 
-    unsafe fn init_mapping(file: File, mut map: MmapMut, cap: usize) -> Result<Self, IpcError> {
+    unsafe fn init_mapping(mut map: MmapMut, cap: usize) -> Result<Self, IpcError> {
         let base = map.as_mut_ptr();
         let mut off = 0usize;
 
@@ -143,7 +149,6 @@ impl RingWriter {
         let ring_cap = align_up(cap, HDR_ALIGN);
 
         Ok(Self {
-            file,
             map,
             hdr: hdr_ptr,
             data_avail: data_evt,
@@ -299,9 +304,11 @@ impl RingWriter {
 impl RingReader {
     /// Open an existing ring mapping at `path`.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, IpcError> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        let len = file.metadata()?.len() as usize;
-        let map = unsafe { MmapOptions::new().len(len).map_mut(&file)? };
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    let len = file.metadata()?.len() as usize;
+    let map = unsafe { MmapOptions::new().len(len).map_mut(&file)? };
+    // We don't need to retain the file descriptor after mapping.
+    drop(file);
 
         // Reconstruct layout
         unsafe {
@@ -329,7 +336,6 @@ impl RingReader {
             let ring_cap = align_up(cap, HDR_ALIGN);
 
             Ok(Self {
-                file,
                 map,
                 hdr: hdr_ptr,
                 data_avail: data_evt,

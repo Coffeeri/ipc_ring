@@ -109,8 +109,8 @@ fn run_writer(cli: Cli) -> anyhow::Result<()> {
     let mut buf = vec![0u8; cli.msg_size];
 
     // Pre-fill payload beyond seq id; not strictly necessary
-    for i in 8..buf.len() {
-        buf[i] = (i & 0xFF) as u8;
+    for (i, b) in buf.iter_mut().enumerate().skip(8) {
+        *b = (i & 0xFF) as u8;
     }
 
     for i in 0..cli.messages {
