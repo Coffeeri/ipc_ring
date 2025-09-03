@@ -6,7 +6,7 @@
 #![cfg(unix)]
 
 use memmap2::{MmapMut, MmapOptions};
-use raw_sync::events::{Event, EventState};
+use raw_sync::events::{EventInit, EventState};
 use raw_sync::Timeout;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -72,6 +72,21 @@ pub enum IpcError {
     Event(Box<dyn std::error::Error + Send + Sync>),
 }
 
+#[derive(Debug)]
+struct SimpleError(String);
+
+impl std::fmt::Display for SimpleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SimpleError {}
+
+fn to_send_sync_error(err: Box<dyn std::error::Error>) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(SimpleError(err.to_string()))
+}
+
 impl RingWriter {
     /// Create a new ring mapping at `path`. Fails if the file exists.
     pub fn create<P: AsRef<Path>>(path: P, cap_pow2: usize) -> Result<Self, IpcError> {
@@ -110,10 +125,10 @@ impl RingWriter {
 
         // Events (manual-reset=true)
         let (data_evt, used1) = raw_sync::events::Event::new(base.add(off), true)
-            .map_err(IpcError::Event)?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
         off += align_up(used1, align_of::<usize>());
         let (space_evt, used2) = raw_sync::events::Event::new(base.add(off), true)
-            .map_err(IpcError::Event)?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
         off += align_up(used2, align_of::<usize>());
         off = align_up(off, HDR_ALIGN);
 
@@ -161,7 +176,7 @@ impl RingWriter {
         hdr.write.store(write + bump, Ordering::Release);
 
         // Signal data available
-        self.data_avail.set(EventState::Signaled).map_err(IpcError::Event)?;
+        self.data_avail.set(EventState::Signaled).map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
         Ok(())
     }
 
@@ -172,7 +187,7 @@ impl RingWriter {
                 Ok(()) => return Ok(()),
                 Err(IpcError::Full) => {
                     let to = timeout.map(Timeout::Val).unwrap_or(Timeout::Infinite);
-                    self.space_avail.wait(to).map_err(IpcError::Event)?;
+                    self.space_avail.wait(to).map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
                 }
                 Err(e) => return Err(e),
             }
@@ -232,10 +247,10 @@ impl RingReader {
             off += align_up(size_of::<Header>(), HDR_ALIGN);
 
             let (data_evt, used1) = raw_sync::events::Event::from_existing(base.add(off))
-                .map_err(IpcError::Event)?;
+                .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
             off += align_up(used1, align_of::<usize>());
             let (space_evt, used2) = raw_sync::events::Event::from_existing(base.add(off))
-                .map_err(IpcError::Event)?;
+                .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
             off += align_up(used2, align_of::<usize>());
             off = align_up(off, HDR_ALIGN);
 
@@ -258,7 +273,7 @@ impl RingReader {
         let read  = hdr.read.load(Ordering::Relaxed);
         if write == read { return Ok(None); }
 
-        let mut r = read as usize & self.mask;
+        let r = read as usize & self.mask;
         // Read header with Acquire (ensures payload visibility).
         let h = self.read_header(r);
         if (h & READY) == 0 {
@@ -271,7 +286,7 @@ impl RingReader {
             // Wrap marker
             let bump = (self.ring_cap - r) as u64;
             hdr.read.store(read + bump, Ordering::Release);
-            self.space_avail.set(EventState::Signaled).map_err(IpcError::Event)?;
+            self.space_avail.set(EventState::Signaled).map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
             return self.try_pop(out);
         }
 
@@ -282,7 +297,7 @@ impl RingReader {
         hdr.read.store(read + bump, Ordering::Release);
 
         // Signal writer that there is room
-        self.space_avail.set(EventState::Signaled).map_err(IpcError::Event)?;
+        self.space_avail.set(EventState::Signaled).map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
         Ok(Some(size))
     }
 
@@ -291,7 +306,7 @@ impl RingReader {
         loop {
             if let Some(n) = self.try_pop(out)? { return Ok(n); }
             let to = timeout.map(Timeout::Val).unwrap_or(Timeout::Infinite);
-            self.data_avail.wait(to).map_err(IpcError::Event)?;
+            self.data_avail.wait(to).map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
         }
     }
 
