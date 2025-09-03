@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 #[derive(Parser, Debug)]
-#[command(name="ipc_bench")]
-#[command(about="Throughput benchmark for ipc_ring (macOS + Linux)")]
+#[command(name = "ipc_bench")]
+#[command(about = "Throughput benchmark for ipc_ring (macOS + Linux)")]
 struct Cli {
     /// Path to the ring file (/dev/shm on Linux, /tmp on macOS)
     #[arg(long, default_value = default_ring_path())]
@@ -54,20 +54,28 @@ fn run_driver(cli: Cli) -> anyhow::Result<()> {
 
     // Spawn reader first (it will loop trying to open until the writer creates the ring).
     let mut child_reader = Command::new(&exepath)
-        .arg("--ring").arg(&cli.ring)
-        .arg("--messages").arg(cli.messages.to_string())
-        .arg("--msg-size").arg(cli.msg_size.to_string())
-        .arg("--cap").arg(cap.to_string())
+        .arg("--ring")
+        .arg(&cli.ring)
+        .arg("--messages")
+        .arg(cli.messages.to_string())
+        .arg("--msg-size")
+        .arg(cli.msg_size.to_string())
+        .arg("--cap")
+        .arg(cap.to_string())
         .arg("reader")
         .stdout(Stdio::piped())
         .spawn()?;
 
     // Spawn writer second (creates the ring)
     let mut child_writer = Command::new(&exepath)
-        .arg("--ring").arg(&cli.ring)
-        .arg("--messages").arg(cli.messages.to_string())
-        .arg("--msg-size").arg(cli.msg_size.to_string())
-        .arg("--cap").arg(cap.to_string())
+        .arg("--ring")
+        .arg(&cli.ring)
+        .arg("--messages")
+        .arg(cli.messages.to_string())
+        .arg("--msg-size")
+        .arg(cli.msg_size.to_string())
+        .arg("--cap")
+        .arg(cap.to_string())
         .arg("writer")
         .stdout(Stdio::null())
         .spawn()?;
@@ -101,7 +109,9 @@ fn run_writer(cli: Cli) -> anyhow::Result<()> {
     let mut buf = vec![0u8; cli.msg_size];
 
     // Pre-fill payload beyond seq id; not strictly necessary
-    for i in 8..buf.len() { buf[i] = (i & 0xFF) as u8; }
+    for i in 8..buf.len() {
+        buf[i] = (i & 0xFF) as u8;
+    }
 
     for i in 0..cli.messages {
         // write seq id LE in the first 8 bytes
@@ -138,7 +148,9 @@ fn run_reader(cli: Cli) -> anyhow::Result<()> {
         id_bytes.copy_from_slice(&buf[0..8]);
         let seq = u64::from_le_bytes(id_bytes);
 
-        if count == 0 { t0 = Some(Instant::now()); }
+        if count == 0 {
+            t0 = Some(Instant::now());
+        }
         if (seq as usize) != count {
             eprintln!("Out of order or drop at count={} got seq={}", count, seq);
             // Keep going, but correctness anomaly will skew numbers.
@@ -165,15 +177,21 @@ fn run_reader(cli: Cli) -> anyhow::Result<()> {
 }
 
 fn round_up_pow2(mut x: usize) -> usize {
-    if x < 2 { return 2; }
-    if x.is_power_of_two() { return x; }
+    if x < 2 {
+        return 2;
+    }
+    if x.is_power_of_two() {
+        return x;
+    }
     x -= 1;
     x |= x >> 1;
     x |= x >> 2;
     x |= x >> 4;
     x |= x >> 8;
     x |= x >> 16;
-    if usize::BITS == 64 { x |= x >> 32; }
+    if usize::BITS == 64 {
+        x |= x >> 32;
+    }
     x + 1
 }
 
@@ -182,4 +200,3 @@ const fn default_ring_path() -> &'static str {
     // On Linux prefer /dev/shm; on macOS /tmp works well
     "/tmp/ipc_ring.bench"
 }
-
