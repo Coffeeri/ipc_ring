@@ -142,7 +142,12 @@ impl RingMapping {
     #[inline]
     fn write_header(&self, w: usize, len: u32) {
         let pos = w & self.mask;
-        debug_assert!(pos < self.ring_cap, "write position {} >= ring_cap {}", pos, self.ring_cap);
+        debug_assert!(
+            pos < self.ring_cap,
+            "write position {} >= ring_cap {}",
+            pos,
+            self.ring_cap
+        );
         let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
         unsafe { (&*p).store(len, Ordering::Relaxed) };
     }
@@ -151,7 +156,12 @@ impl RingMapping {
     fn publish_header(&self, w: usize, len: u32) {
         fence(Ordering::Release);
         let pos = w & self.mask;
-        debug_assert!(pos < self.ring_cap, "publish position {} >= ring_cap {}", pos, self.ring_cap);
+        debug_assert!(
+            pos < self.ring_cap,
+            "publish position {} >= ring_cap {}",
+            pos,
+            self.ring_cap
+        );
         let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
         unsafe { (&*p).store(len | READY, Ordering::Release) };
     }
@@ -164,7 +174,11 @@ impl RingMapping {
             let first = (end - pos).min(data.len());
             ptr::copy_nonoverlapping(data.as_ptr(), self.ring_ptr.add(pos), first);
             if first < data.len() {
-                ptr::copy_nonoverlapping(data.as_ptr().add(first), self.ring_ptr, data.len() - first);
+                ptr::copy_nonoverlapping(
+                    data.as_ptr().add(first),
+                    self.ring_ptr,
+                    data.len() - first,
+                );
             }
             // optional zero padding to 4B boundary
             let pad = align_up(data.len(), 4) - data.len();
@@ -175,7 +189,11 @@ impl RingMapping {
                 let first_pad = (end - pad_start).min(pad);
                 ptr::copy_nonoverlapping(zeros.as_ptr(), self.ring_ptr.add(pad_start), first_pad);
                 if first_pad < pad {
-                    ptr::copy_nonoverlapping(zeros.as_ptr().add(first_pad), self.ring_ptr, pad - first_pad);
+                    ptr::copy_nonoverlapping(
+                        zeros.as_ptr().add(first_pad),
+                        self.ring_ptr,
+                        pad - first_pad,
+                    );
                 }
             }
         }
@@ -196,7 +214,11 @@ impl RingMapping {
             let first = (end - pos).min(out.len());
             ptr::copy_nonoverlapping(self.ring_ptr.add(pos), out.as_mut_ptr(), first);
             if first < out.len() {
-                ptr::copy_nonoverlapping(self.ring_ptr, out.as_mut_ptr().add(first), out.len() - first);
+                ptr::copy_nonoverlapping(
+                    self.ring_ptr,
+                    out.as_mut_ptr().add(first),
+                    out.len() - first,
+                );
             }
         }
     }
@@ -250,11 +272,11 @@ impl RingWriter {
 
         file.set_len(layout as u64)?;
 
-    let map = unsafe { MmapOptions::new().len(layout).map_mut(&file)? };
-    // `file` can be dropped after mapping; mapping remains valid until unmapped.
-    drop(file);
-    let inner = unsafe { RingMapping::init_new(map, cap_pow2) }?;
-    Ok(Self { inner })
+        let map = unsafe { MmapOptions::new().len(layout).map_mut(&file)? };
+        // `file` can be dropped after mapping; mapping remains valid until unmapped.
+        drop(file);
+        let inner = unsafe { RingMapping::init_new(map, cap_pow2) }?;
+        Ok(Self { inner })
     }
 
     /// Try to push without blocking.
@@ -267,7 +289,11 @@ impl RingWriter {
             self.inner.ring_cap.is_power_of_two(),
             "ring_cap must be power of 2"
         );
-        debug_assert_eq!(self.inner.mask, self.inner.ring_cap - 1, "mask must equal ring_cap - 1");
+        debug_assert_eq!(
+            self.inner.mask,
+            self.inner.ring_cap - 1,
+            "mask must equal ring_cap - 1"
+        );
 
         let hdr = unsafe { &*self.inner.hdr };
         let read = hdr.read.load(Ordering::Acquire);
@@ -280,7 +306,7 @@ impl RingWriter {
             return Err(IpcError::Full);
         }
 
-    let mut w = cur_write as usize & self.inner.mask;
+        let mut w = cur_write as usize & self.inner.mask;
 
         // Ensure header is contiguous; if not, write a wrap marker (len=0|READY)
         if w + 4 > self.inner.ring_cap || w + 4 + payload.len() > self.inner.ring_cap {
@@ -306,9 +332,9 @@ impl RingWriter {
         }
 
         // Write header (no READY), copy payload, then publish (set READY)
-    self.write_header(w, payload.len() as u32);
-    self.write_payload(w + 4, payload);
-    self.publish_header(w, payload.len() as u32);
+        self.write_header(w, payload.len() as u32);
+        self.write_payload(w + 4, payload);
+        self.publish_header(w, payload.len() as u32);
 
         let bump = align_up(4 + payload.len(), 4) as u64;
         cur_write = cur_write.wrapping_add(bump);
@@ -329,7 +355,8 @@ impl RingWriter {
                 Ok(()) => return Ok(()),
                 Err(IpcError::Full) => {
                     let to = timeout.map(Timeout::Val).unwrap_or(Timeout::Infinite);
-                    self.inner.space_avail
+                    self.inner
+                        .space_avail
                         .wait(to)
                         .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
                 }
@@ -339,11 +366,17 @@ impl RingWriter {
     }
 
     #[inline]
-    fn write_header(&self, w: usize, len: u32) { self.inner.write_header(w, len); }
+    fn write_header(&self, w: usize, len: u32) {
+        self.inner.write_header(w, len);
+    }
     #[inline]
-    fn publish_header(&self, w: usize, len: u32) { self.inner.publish_header(w, len); }
+    fn publish_header(&self, w: usize, len: u32) {
+        self.inner.publish_header(w, len);
+    }
     #[inline]
-    fn write_payload(&self, w: usize, data: &[u8]) { self.inner.write_payload(w, data); }
+    fn write_payload(&self, w: usize, data: &[u8]) {
+        self.inner.write_payload(w, data);
+    }
 }
 
 impl RingReader {
@@ -475,7 +508,7 @@ mod tests {
         // Create a file with a valid size but wrong magic to trigger IpcError::Layout
         let path = test_ring_path();
         cleanup_ring(&path);
-    let f = fs::OpenOptions::new()
+        let f = fs::OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
@@ -631,7 +664,7 @@ mod tests {
         let path = test_ring_path();
         cleanup_ring(&path);
 
-    let writer = RingWriter::create(&path, 64).unwrap();
+        let writer = RingWriter::create(&path, 64).unwrap();
         // Choose a position near the end so the data crosses the boundary
         let w = 54; // pos = 54, end = 64, gap = 10
         let data: Vec<u8> = (0u8..16u8).collect(); // 16 bytes, will split 10 + 6
@@ -658,7 +691,7 @@ mod tests {
         let path = test_ring_path();
         cleanup_ring(&path);
 
-    let writer = RingWriter::create(&path, 64).unwrap();
+        let writer = RingWriter::create(&path, 64).unwrap();
         let w = 51; // pos=51; with len=13 (pad=3), pos+len=64, pad wraps 3 bytes to start
         let data: Vec<u8> = (0u8..13u8).collect();
 
@@ -682,22 +715,27 @@ mod tests {
         // Write known bytes spanning the end, then read them back via read_payload
         let path = test_ring_path();
         cleanup_ring(&path);
-    let writer = RingWriter::create(&path, 64).unwrap();
-    let reader = RingReader::open(&path).unwrap();
+        let writer = RingWriter::create(&path, 64).unwrap();
+        let reader = RingReader::open(&path).unwrap();
 
         unsafe {
             let ptr = writer.inner.ring_ptr;
             let end = writer.inner.ring_cap;
             // Place 10 bytes at end and 6 at start
-            let tail: [u8; 10] = [1,2,3,4,5,6,7,8,9,10];
-            let head: [u8; 6] = [11,12,13,14,15,16];
+            let tail: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+            let head: [u8; 6] = [11, 12, 13, 14, 15, 16];
             ptr::copy_nonoverlapping(tail.as_ptr(), ptr.add(end - 10), 10);
             ptr::copy_nonoverlapping(head.as_ptr(), ptr, 6);
         }
         let mut out = vec![0u8; 16];
         // Start reading at r=end-10 so it wraps
-    reader.inner.read_payload(writer.inner.ring_cap - 10, &mut out);
-        assert_eq!(out, vec![1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]);
+        reader
+            .inner
+            .read_payload(writer.inner.ring_cap - 10, &mut out);
+        assert_eq!(
+            out,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
 
         cleanup_ring(&path);
     }
@@ -707,7 +745,7 @@ mod tests {
         // Force write>read but header at read offset is not READY => Ok(None)
         let path = test_ring_path();
         cleanup_ring(&path);
-    let writer = RingWriter::create(&path, 128).unwrap();
+        let writer = RingWriter::create(&path, 128).unwrap();
         let mut reader = RingReader::open(&path).unwrap();
 
         unsafe {
@@ -717,7 +755,7 @@ mod tests {
             hdr.write.store(8, Ordering::Relaxed);
             // At r=0, write a header with len but WITHOUT READY bit
             writer.inner.write_header(0, 12); // 12 bytes
-            // Do not publish (no READY); reader should see not READY and return None
+                                              // Do not publish (no READY); reader should see not READY and return None
         }
 
         let mut buf = Vec::new();
@@ -734,7 +772,9 @@ mod tests {
         cleanup_ring(&path);
         let mut writer = RingWriter::create(&path, 1024).unwrap();
         let huge = vec![0u8; 4096];
-        let err = writer.push(&huge, Some(Duration::from_millis(1))).unwrap_err();
+        let err = writer
+            .push(&huge, Some(Duration::from_millis(1)))
+            .unwrap_err();
         assert!(matches!(err, IpcError::TooLarge));
         cleanup_ring(&path);
     }
