@@ -260,13 +260,13 @@ fn to_send_sync_error(err: &dyn std::error::Error) -> Box<dyn std::error::Error 
 
 impl RingWriter {
     /// Create a new ring mapping at `path`. Fails if the file exists.
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// Panics if `cap_pow2` is not a power of two.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - File already exists
     /// - Cannot create or write to the file
@@ -296,9 +296,9 @@ impl RingWriter {
     }
 
     /// Try to push without blocking.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - Message is too large for the ring buffer  
     /// - Ring buffer is full
@@ -371,9 +371,9 @@ impl RingWriter {
     }
 
     /// Push with optional timeout (None = infinite).
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - Message is too large for the ring buffer
     /// - Ring buffer is full and timeout expires
@@ -410,9 +410,9 @@ impl RingWriter {
 
 impl RingReader {
     /// Open an existing ring mapping at `path`.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - File does not exist or cannot be read
     /// - File has invalid magic header or layout
@@ -432,9 +432,9 @@ impl RingReader {
     }
 
     /// Try to pop without blocking. On success returns `Some(bytes_written_into_out)`.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - Event synchronization fails during space signaling
     pub fn try_pop(&mut self, out: &mut Vec<u8>) -> Result<Option<usize>, IpcError> {
@@ -480,9 +480,9 @@ impl RingReader {
     }
 
     /// Blocking pop with optional timeout (None = infinite).
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// - Timeout expires with no data available
     /// - Event synchronization fails
