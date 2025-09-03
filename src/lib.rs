@@ -424,6 +424,7 @@ impl RingReader {
 mod tests {
     use super::*;
     use std::fs;
+    use std::slice;
 
     fn test_ring_path() -> String {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -467,6 +468,30 @@ mod tests {
 
         let result = RingReader::open(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_invalid_magic_layout_error() {
+        // Create a file with a valid size but wrong magic to trigger IpcError::Layout
+        let path = test_ring_path();
+        cleanup_ring(&path);
+    let f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&path)
+            .unwrap();
+        // Write at least a header's worth of zeros so mapping and header read are safe
+        let dummy_len = 4096u64;
+        f.set_len(dummy_len).unwrap();
+        // Try to open as reader: should fail with Layout
+        let res = RingReader::open(&path);
+        match res {
+            Err(IpcError::Layout) => {}
+            Ok(_) => panic!("expected Layout error, got Ok(_)"),
+            Err(other) => panic!("expected Layout error, got {other:?}"),
+        }
+        cleanup_ring(&path);
     }
 
     #[test]
@@ -598,6 +623,151 @@ mod tests {
         assert_eq!(&buf[..], &msg[..]);
 
         cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_write_payload_wraps_data_across_end() {
+        // Directly exercise write_payload's wrap copy (second segment at start of ring)
+        let path = test_ring_path();
+        cleanup_ring(&path);
+
+    let writer = RingWriter::create(&path, 64).unwrap();
+        // Choose a position near the end so the data crosses the boundary
+        let w = 54; // pos = 54, end = 64, gap = 10
+        let data: Vec<u8> = (0u8..16u8).collect(); // 16 bytes, will split 10 + 6
+
+        // Perform raw payload write (bypassing header constraints for coverage)
+        writer.write_payload(w, &data);
+
+        unsafe {
+            let ptr = writer.inner.ring_ptr;
+            let end = writer.inner.ring_cap;
+            let slice_all = slice::from_raw_parts(ptr, end);
+            // Verify tail at [54..64)
+            assert_eq!(&slice_all[54..64], &data[0..10]);
+            // Verify wrap at [0..6)
+            assert_eq!(&slice_all[0..6], &data[10..16]);
+        }
+
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_write_payload_padding_wraps_across_end() {
+        // Exercise zero-padding wrap branch where pad spills into start of ring
+        let path = test_ring_path();
+        cleanup_ring(&path);
+
+    let writer = RingWriter::create(&path, 64).unwrap();
+        let w = 51; // pos=51; with len=13 (pad=3), pos+len=64, pad wraps 3 bytes to start
+        let data: Vec<u8> = (0u8..13u8).collect();
+
+        writer.write_payload(w, &data);
+
+        unsafe {
+            let ptr = writer.inner.ring_ptr;
+            let end = writer.inner.ring_cap;
+            let slice_all = slice::from_raw_parts(ptr, end);
+            // Data ends exactly at ring end
+            assert_eq!(&slice_all[51..64], &data[..]);
+            // Padding wraps to start: first 3 bytes must be zero
+            assert_eq!(&slice_all[0..3], &[0u8, 0u8, 0u8]);
+        }
+
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_read_payload_wraps_across_end() {
+        // Write known bytes spanning the end, then read them back via read_payload
+        let path = test_ring_path();
+        cleanup_ring(&path);
+    let writer = RingWriter::create(&path, 64).unwrap();
+    let reader = RingReader::open(&path).unwrap();
+
+        unsafe {
+            let ptr = writer.inner.ring_ptr;
+            let end = writer.inner.ring_cap;
+            // Place 10 bytes at end and 6 at start
+            let tail: [u8; 10] = [1,2,3,4,5,6,7,8,9,10];
+            let head: [u8; 6] = [11,12,13,14,15,16];
+            ptr::copy_nonoverlapping(tail.as_ptr(), ptr.add(end - 10), 10);
+            ptr::copy_nonoverlapping(head.as_ptr(), ptr, 6);
+        }
+        let mut out = vec![0u8; 16];
+        // Start reading at r=end-10 so it wraps
+    reader.inner.read_payload(writer.inner.ring_cap - 10, &mut out);
+        assert_eq!(out, vec![1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]);
+
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_try_pop_not_ready_returns_none() {
+        // Force write>read but header at read offset is not READY => Ok(None)
+        let path = test_ring_path();
+        cleanup_ring(&path);
+    let writer = RingWriter::create(&path, 128).unwrap();
+        let mut reader = RingReader::open(&path).unwrap();
+
+        unsafe {
+            let hdr = &*writer.inner.hdr;
+            // Place read at 0, write at 8 so write>read
+            hdr.read.store(0, Ordering::Relaxed);
+            hdr.write.store(8, Ordering::Relaxed);
+            // At r=0, write a header with len but WITHOUT READY bit
+            writer.inner.write_header(0, 12); // 12 bytes
+            // Do not publish (no READY); reader should see not READY and return None
+        }
+
+        let mut buf = Vec::new();
+        let res = reader.try_pop(&mut buf).unwrap();
+        assert!(res.is_none(), "expected None when header not READY");
+
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_push_propagates_non_full_error() {
+        // push() should propagate TooLarge directly (covers Err(e) arm)
+        let path = test_ring_path();
+        cleanup_ring(&path);
+        let mut writer = RingWriter::create(&path, 1024).unwrap();
+        let huge = vec![0u8; 4096];
+        let err = writer.push(&huge, Some(Duration::from_millis(1))).unwrap_err();
+        assert!(matches!(err, IpcError::TooLarge));
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_try_push_full_due_to_wrap_space_check() {
+        // Craft hdr.read/write to force: space >= need but space < gap + need -> Full in wrap branch
+        let path = test_ring_path();
+        cleanup_ring(&path);
+        let mut writer = RingWriter::create(&path, 64).unwrap();
+
+        let payload = vec![0u8; 16]; // need = align_up(20,4)=20
+        unsafe {
+            let hdr = &*writer.inner.hdr;
+            // Set write=56 (w=56), read=16 => used=40, space=24
+            hdr.write.store(56, Ordering::Relaxed);
+            hdr.read.store(16, Ordering::Relaxed);
+        }
+        let err = writer.try_push(&payload).unwrap_err();
+        assert!(matches!(err, IpcError::Full));
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_simple_error_and_converter() {
+        // Cover Display and the to_send_sync_error adapter
+        let e = SimpleError("hello".to_string());
+        assert_eq!(format!("{}", e), "hello");
+        let boxed: Box<dyn std::error::Error> = Box::new(SimpleError("x".to_string()));
+        let send_sync = to_send_sync_error(boxed);
+        // Type assertion: must be Send + Sync
+        fn assert_send_sync(_: &(dyn std::error::Error + Send + Sync)) {}
+        assert_send_sync(&*send_sync);
     }
 
     #[test]
