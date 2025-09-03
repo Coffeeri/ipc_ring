@@ -1,0 +1,15 @@
+[package]
+name = "ipc_ring"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+memmap2   = "0.9"
+raw_sync  = "0.1"
+thiserror = "1"
+
+[features]
+# unix-only crate (Linux + macOS)
+
