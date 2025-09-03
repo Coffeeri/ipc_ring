@@ -4,11 +4,34 @@ Memory-mapped SPSC ring buffer for high-performance inter-process communication 
 
 ## Performance
 
-**M1 Pro (32GB RAM)**: 20.6M msgs/s, 5.0 GiB/s (256B messages)
+**MacBook Pro 2021 M1 Pro, 32GB RAM, 1TB NVMe**: 16.3M msgs/s, 3.9 GiB/s (256B messages)
 
 ```
-{"messages":50000,"msg_size":256,"elapsed_sec":0.002429,"msgs_per_sec":20587069,"MiB_per_sec":5026.14}
+{"messages":1000000,"msg_size":256,"elapsed_sec":0.061254,"msgs_per_sec":16325531,"MiB_per_sec":3985.73}
 ```
+
+### Benchmark Comparison
+
+Tested against [ipmpsc](https://github.com/dicej/ipmpsc) (serialized MPSC ring buffer):
+
+| Library | Messages/sec | Throughput | Ratio |
+|---------|-------------|-----------|-------|
+| **ipc_ring** | 16.3M | 3.9 GiB/s | **20.6x** |
+| **ipmpsc** | 791K | 193 MiB/s | 1x |
+
+**Use ipc_ring when:**
+- Single producer/consumer pattern fits your use case
+- Raw byte transfers (no serialization overhead needed)  
+- Maximum throughput is critical
+- Streaming pre-formatted data (JSON lines, log entries, etc.)
+
+**Comparison limitations:**
+- ipmpsc supports multiple producers; ipc_ring is SPSC only
+- ipmpsc provides type-safe serialization; ipc_ring handles raw bytes
+- ipmpsc is cross-platform; ipc_ring is Unix-only
+- Different synchronization mechanisms (lock-free vs mutex-based)
+
+**Perfect for:** Streaming JSON events to compression/storage processes, high-frequency logging, real-time data pipelines where serialization overhead is unwanted.
 
 ## Build
 
