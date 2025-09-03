@@ -91,12 +91,12 @@ fn run_driver(cli: Cli) -> anyhow::Result<()> {
     let status = child_reader.wait()?;
 
     if !status.success() {
-        eprintln!("Reader failed; raw output:\n{}", out);
+        eprintln!("Reader failed; raw output:\n{out}");
         anyhow::bail!("reader exited with status {:?}", status);
     }
 
     // Print reader's summary (already JSON + human string).
-    print!("{}", out);
+    print!("{out}");
     Ok(())
 }
 
@@ -152,7 +152,7 @@ fn run_reader(cli: Cli) -> anyhow::Result<()> {
             t0 = Some(Instant::now());
         }
         if (seq as usize) != count {
-            eprintln!("Out of order or drop at count={} got seq={}", count, seq);
+            eprintln!("Out of order or drop at count={count} got seq={seq}");
             // Keep going, but correctness anomaly will skew numbers.
         }
         count += 1;

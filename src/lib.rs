@@ -534,7 +534,7 @@ mod tests {
             match writer.try_push(&msg) {
                 Ok(()) => continue,
                 Err(IpcError::Full) => break,
-                Err(e) => panic!("Unexpected error: {:?}", e),
+                Err(e) => panic!("Unexpected error: {e:?}"),
             }
         }
 
@@ -617,7 +617,7 @@ mod tests {
 
         // Send messages with sequence numbers
         for i in 0..100 {
-            let msg = format!("message_{}", i);
+            let msg = format!("message_{i}");
             writer.try_push(msg.as_bytes()).unwrap();
         }
 
@@ -625,7 +625,7 @@ mod tests {
         for i in 0..100 {
             let n = reader.try_pop(&mut buf).unwrap();
             assert!(n.is_some());
-            let expected = format!("message_{}", i);
+            let expected = format!("message_{i}");
             assert_eq!(&buf[..], expected.as_bytes());
         }
 
