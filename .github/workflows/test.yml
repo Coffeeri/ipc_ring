@@ -1,0 +1,55 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runner: ubuntu-latest
+          - os: macos-latest
+            runner: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Check formatting
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo fmt -- --check
+
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+
+    - name: Run tests
+      run: cargo test
+
+    - name: Build release
+      run: cargo build --release
+
+    - name: Test benchmark
+      run: cargo run --bin ipc_bench -- --messages 100 --msg-size 64 --cap 1048576
