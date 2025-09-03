@@ -2,6 +2,11 @@
 name = "ipc_ring"
 version = "0.1.0"
 edition = "2021"
+description = "High-performance memory-mapped SPSC ring buffer for Unix IPC"
+license = "MIT"
+repository = "https://github.com/Coffeeri/ipc_ring"
+keywords = ["ipc", "ring-buffer", "mmap", "unix", "spsc"]
+categories = ["os", "concurrency", "memory-management"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

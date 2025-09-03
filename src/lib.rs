@@ -1,9 +1,14 @@
-//! ipc_ring: mmap-backed SPSC shared-memory ring for Unix (Linux + macOS).
+//! `ipc_ring`: mmap-backed SPSC shared-memory ring for Unix (Linux + macOS).
 //! - Generic: carries raw bytes
 //! - No compression, no JSON assumptions
 //! - One writer process <-> one reader process
 
 #![cfg(unix)]
+#![deny(clippy::all)]
+#![deny(clippy::pedantic)]
+#![allow(clippy::cast_ptr_alignment)] // Necessary for low-level memory mapping
+#![allow(clippy::cast_possible_truncation)] // File sizes and offsets are validated
+#![allow(clippy::multiple_crate_versions)] // Dependency issue, not our code
 
 use memmap2::{MmapMut, MmapOptions};
 use raw_sync::events::{EventInit, EventState};
@@ -18,12 +23,12 @@ use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
-const MAGIC: u64 = 0x49504352494E4731; // "IPCRING1"
+const MAGIC: u64 = 0x4950_4352_494E_4731; // "IPCRING1"
 const READY: u32 = 1 << 31;
 const HDR_ALIGN: usize = 64;
 
 #[inline]
-fn align_up(x: usize, a: usize) -> usize {
+const fn align_up(x: usize, a: usize) -> usize {
     (x + a - 1) & !(a - 1)
 }
 
@@ -67,7 +72,7 @@ impl RingMapping {
         let mut off = 0usize;
 
         // Header
-        let hdr_ptr = base.add(off) as *mut Header;
+        let hdr_ptr = base.add(off).cast::<Header>();
         ptr::write(
             hdr_ptr,
             Header {
@@ -82,10 +87,10 @@ impl RingMapping {
 
         // Events (manual-reset=true)
         let (data_evt, used1) = raw_sync::events::Event::new(base.add(off), true)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         off += align_up(used1, align_of::<usize>());
         let (space_evt, used2) = raw_sync::events::Event::new(base.add(off), true)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         off += align_up(used2, align_of::<usize>());
         off = align_up(off, HDR_ALIGN);
 
@@ -108,20 +113,20 @@ impl RingMapping {
         let base = map.as_mut_ptr();
         let mut off = 0usize;
 
-        let hdr = &*(base as *const Header);
+        let hdr = &*base.cast::<Header>();
         if hdr.magic != MAGIC {
             return Err(IpcError::Layout);
         }
         let cap = hdr.cap as usize;
 
-        let hdr_ptr = base as *mut Header;
+        let hdr_ptr = base.cast::<Header>();
         off += align_up(size_of::<Header>(), HDR_ALIGN);
 
         let (data_evt, used1) = raw_sync::events::Event::from_existing(base.add(off))
-            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         off += align_up(used1, align_of::<usize>());
         let (space_evt, used2) = raw_sync::events::Event::from_existing(base.add(off))
-            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         off += align_up(used2, align_of::<usize>());
         off = align_up(off, HDR_ALIGN);
 
@@ -148,7 +153,7 @@ impl RingMapping {
             pos,
             self.ring_cap
         );
-        let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
+        let p = unsafe { self.ring_ptr.add(pos).cast::<AtomicU32>() };
         unsafe { (&*p).store(len, Ordering::Relaxed) };
     }
 
@@ -162,7 +167,7 @@ impl RingMapping {
             pos,
             self.ring_cap
         );
-        let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
+        let p = unsafe { self.ring_ptr.add(pos).cast::<AtomicU32>() };
         unsafe { (&*p).store(len | READY, Ordering::Release) };
     }
 
@@ -202,7 +207,7 @@ impl RingMapping {
     #[inline]
     fn read_header(&self, r: usize) -> u32 {
         let pos = r & self.mask;
-        let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 };
+        let p = unsafe { self.ring_ptr.add(pos).cast::<AtomicU32>() };
         unsafe { (&*p).load(Ordering::Acquire) }
     }
 
@@ -249,12 +254,23 @@ impl std::fmt::Display for SimpleError {
 
 impl std::error::Error for SimpleError {}
 
-fn to_send_sync_error(err: Box<dyn std::error::Error>) -> Box<dyn std::error::Error + Send + Sync> {
+fn to_send_sync_error(err: &dyn std::error::Error) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(SimpleError(err.to_string()))
 }
 
 impl RingWriter {
     /// Create a new ring mapping at `path`. Fails if the file exists.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cap_pow2` is not a power of two.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - File already exists
+    /// - Cannot create or write to the file
+    /// - Memory mapping fails
     pub fn create<P: AsRef<Path>>(path: P, cap_pow2: usize) -> Result<Self, IpcError> {
         assert!(cap_pow2.is_power_of_two());
         let evt_sz = raw_sync::events::Event::size_of(None);
@@ -280,6 +296,12 @@ impl RingWriter {
     }
 
     /// Try to push without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Message is too large for the ring buffer  
+    /// - Ring buffer is full
     pub fn try_push(&mut self, payload: &[u8]) -> Result<(), IpcError> {
         if payload.len() + 4 > self.inner.ring_cap {
             return Err(IpcError::TooLarge);
@@ -326,7 +348,7 @@ impl RingWriter {
                 .inner
                 .data_avail
                 .set(EventState::Signaled)
-                .map_err(|e| IpcError::Event(to_send_sync_error(e)));
+                .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())));
 
             w = 0; // After wrap marker, next write starts at beginning
         }
@@ -344,21 +366,28 @@ impl RingWriter {
         self.inner
             .data_avail
             .set(EventState::Signaled)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         Ok(())
     }
 
     /// Push with optional timeout (None = infinite).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Message is too large for the ring buffer
+    /// - Ring buffer is full and timeout expires
+    /// - Event synchronization fails
     pub fn push(&mut self, payload: &[u8], timeout: Option<Duration>) -> Result<(), IpcError> {
         loop {
             match self.try_push(payload) {
                 Ok(()) => return Ok(()),
                 Err(IpcError::Full) => {
-                    let to = timeout.map(Timeout::Val).unwrap_or(Timeout::Infinite);
+                    let to = timeout.map_or(Timeout::Infinite, Timeout::Val);
                     self.inner
                         .space_avail
                         .wait(to)
-                        .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+                        .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
                 }
                 Err(e) => return Err(e),
             }
@@ -381,6 +410,13 @@ impl RingWriter {
 
 impl RingReader {
     /// Open an existing ring mapping at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - File does not exist or cannot be read
+    /// - File has invalid magic header or layout
+    /// - Memory mapping fails
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, IpcError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let len = file.metadata()?.len() as usize;
@@ -395,7 +431,12 @@ impl RingReader {
         }
     }
 
-    /// Try to pop without blocking. On success returns Some(bytes_written_into_out).
+    /// Try to pop without blocking. On success returns `Some(bytes_written_into_out)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Event synchronization fails during space signaling
     pub fn try_pop(&mut self, out: &mut Vec<u8>) -> Result<Option<usize>, IpcError> {
         let hdr = unsafe { &*self.inner.hdr };
         let write = hdr.write.load(Ordering::Acquire);
@@ -420,7 +461,7 @@ impl RingReader {
             self.inner
                 .space_avail
                 .set(EventState::Signaled)
-                .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+                .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
             return self.try_pop(out);
         }
 
@@ -434,21 +475,27 @@ impl RingReader {
         self.inner
             .space_avail
             .set(EventState::Signaled)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         Ok(Some(size))
     }
 
     /// Blocking pop with optional timeout (None = infinite).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Timeout expires with no data available
+    /// - Event synchronization fails
     pub fn pop(&mut self, out: &mut Vec<u8>, timeout: Option<Duration>) -> Result<usize, IpcError> {
         loop {
             if let Some(n) = self.try_pop(out)? {
                 return Ok(n);
             }
-            let to = timeout.map(Timeout::Val).unwrap_or(Timeout::Infinite);
+            let to = timeout.map_or(Timeout::Infinite, Timeout::Val);
             self.inner
                 .data_avail
                 .wait(to)
-                .map_err(|e| IpcError::Event(to_send_sync_error(e)))?;
+                .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         }
     }
 }
@@ -804,7 +851,7 @@ mod tests {
         let e = SimpleError("hello".to_string());
         assert_eq!(format!("{}", e), "hello");
         let boxed: Box<dyn std::error::Error> = Box::new(SimpleError("x".to_string()));
-        let send_sync = to_send_sync_error(boxed);
+        let send_sync = to_send_sync_error(boxed.as_ref());
         // Type assertion: must be Send + Sync
         fn assert_send_sync(_: &(dyn std::error::Error + Send + Sync)) {}
         assert_send_sync(&*send_sync);
