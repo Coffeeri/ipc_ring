@@ -159,27 +159,43 @@ impl RingWriter {
         if payload.len() + 4 > self.ring_cap {
             return Err(IpcError::TooLarge);
         }
+        
+        debug_assert!(self.ring_cap.is_power_of_two(), "ring_cap must be power of 2");
+        debug_assert_eq!(self.mask, self.ring_cap - 1, "mask must equal ring_cap - 1");
 
         let hdr = unsafe { &*self.hdr };
         let read = hdr.read.load(Ordering::Acquire);
-        let write = hdr.write.load(Ordering::Relaxed);
-        let used = write - read;
-        let space = self.ring_cap as u64 - used;
+        let mut cur_write = hdr.write.load(Ordering::Relaxed);
+    let used = cur_write - read;
+    let space = self.ring_cap as u64 - used;
         let need = align_up(payload.len() + 4, 4) as u64;
 
         if space < need {
             return Err(IpcError::Full);
         }
 
-        let mut w = write as usize & self.mask;
+        let mut w = cur_write as usize & self.mask;
 
         // Ensure header is contiguous; if not, write a wrap marker (len=0|READY)
         if w + 4 > self.ring_cap || w + 4 + payload.len() > self.ring_cap {
+            // Need to wrap; ensure we have space for the wrap marker (gap to end) + message
+            let gap = (self.ring_cap - w) as u64;
+            if space < gap + need {
+                return Err(IpcError::Full);
+            }
+
+            // Emit wrap marker and advance write pointer to start
             self.write_header(w, 0);
             self.publish_header(w, 0);
-            let bump = (self.ring_cap - w) as u64;
-            hdr.write.store(write + bump, Ordering::Release);
-            w = 0;
+            cur_write = cur_write.wrapping_add(gap);
+            hdr.write.store(cur_write, Ordering::Release);
+            // Wake the reader so it can consume the wrap marker promptly
+            let _ = self
+                .data_avail
+                .set(EventState::Signaled)
+                .map_err(|e| IpcError::Event(to_send_sync_error(e)));
+
+            w = 0;  // After wrap marker, next write starts at beginning
         }
 
         // Write header (no READY), copy payload, then publish (set READY)
@@ -188,7 +204,8 @@ impl RingWriter {
         self.publish_header(w, payload.len() as u32);
 
         let bump = align_up(4 + payload.len(), 4) as u64;
-        hdr.write.store(write + bump, Ordering::Release);
+        cur_write = cur_write.wrapping_add(bump);
+        hdr.write.store(cur_write, Ordering::Release);
 
         // Signal data available
         self.data_avail
@@ -215,7 +232,9 @@ impl RingWriter {
 
     #[inline]
     fn write_header(&mut self, w: usize, len: u32) {
-        let p = unsafe { self.ring_ptr.add(w) as *const AtomicU32 as *mut AtomicU32 };
+        let pos = w & self.mask;
+        debug_assert!(pos < self.ring_cap, "write position {} >= ring_cap {}", pos, self.ring_cap);
+        let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
         unsafe {
             (&*p).store(len, Ordering::Relaxed);
         }
@@ -223,7 +242,9 @@ impl RingWriter {
     #[inline]
     fn publish_header(&mut self, w: usize, len: u32) {
         fence(Ordering::Release);
-        let p = unsafe { self.ring_ptr.add(w) as *const AtomicU32 as *mut AtomicU32 };
+        let pos = w & self.mask;
+        debug_assert!(pos < self.ring_cap, "publish position {} >= ring_cap {}", pos, self.ring_cap);
+        let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 as *mut AtomicU32 };
         unsafe {
             (&*p).store(len | READY, Ordering::Release);
         }
@@ -246,8 +267,17 @@ impl RingWriter {
             let pad = align_up(data.len(), 4) - data.len();
             if pad != 0 {
                 let zeros = [0u8; 3];
-                let dst = self.ring_ptr.add((pos + data.len()) & self.mask);
-                ptr::copy_nonoverlapping(zeros.as_ptr(), dst, pad);
+                let pad_start = (pos + data.len()) & self.mask;
+                let end = self.ring_cap;
+                let first_pad = (end - pad_start).min(pad);
+                ptr::copy_nonoverlapping(zeros.as_ptr(), self.ring_ptr.add(pad_start), first_pad);
+                if first_pad < pad {
+                    ptr::copy_nonoverlapping(
+                        zeros.as_ptr().add(first_pad), 
+                        self.ring_ptr, 
+                        pad - first_pad
+                    );
+                }
             }
         }
     }
@@ -354,7 +384,8 @@ impl RingReader {
 
     #[inline]
     fn read_header(&self, r: usize) -> u32 {
-        let p = unsafe { self.ring_ptr.add(r) as *const AtomicU32 };
+        let pos = r & self.mask;
+        let p = unsafe { self.ring_ptr.add(pos) as *const AtomicU32 };
         unsafe { (&*p).load(Ordering::Acquire) }
     }
     #[inline]
