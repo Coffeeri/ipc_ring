@@ -12,7 +12,7 @@ Memory-mapped SPSC ring buffer for high-performance inter-process communication 
 
 ### Benchmark Comparison
 
-Tested against [ipmpsc](https://github.com/dicej/ipmpsc) (serialized MPSC ring buffer):
+Tested against [ipmpsc](https://github.com/dicej/ipmpsc) (serialized MPSC ring buffer) using 1M messages, 256-byte payloads, 64MB ring capacity on `/tmp` filesystem:
 
 | Library | Messages/sec | Throughput | Ratio |
 |---------|-------------|-----------|-------|
