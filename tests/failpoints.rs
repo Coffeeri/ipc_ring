@@ -260,6 +260,7 @@ fn writer_failpoints_cover_crash_windows() {
 
 #[test]
 fn writer_reports_timeout_when_full() {
+    let _scenario = fail::FailScenario::setup();
     let path = unique_ring_path();
     cleanup(&path);
     let mut writer = RingWriter::create(&path, 64).expect("create ring");
@@ -280,6 +281,7 @@ fn writer_reports_timeout_when_full() {
 
 #[test]
 fn writer_reports_peer_stalled_without_reader() {
+    let _scenario = fail::FailScenario::setup();
     let path = unique_ring_path();
     cleanup(&path);
     let mut writer = RingWriter::create(&path, 64).expect("create ring");
@@ -299,6 +301,7 @@ fn writer_reports_peer_stalled_without_reader() {
 
 #[test]
 fn reader_reports_timeout_when_empty() {
+    let _scenario = fail::FailScenario::setup();
     let path = unique_ring_path();
     cleanup(&path);
 
