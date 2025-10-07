@@ -21,13 +21,14 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const MAGIC: u64 = 0x4950_4352_494E_4731; // "IPCRING1"
 const READY: u32 = 1 << 31;
 const HDR_ALIGN: usize = 64;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 2;
+const STALL_DETECT_THRESHOLD: Duration = Duration::from_millis(500);
 static POLL_INTERVAL_DEFAULT: OnceLock<Duration> = OnceLock::new();
 
 #[cfg(feature = "failpoints")]
@@ -79,6 +80,7 @@ pub struct RingWriter {
     inner: RingMapping,
     last_read: u64,
     poll_interval: Duration,
+    stall_since: Option<Instant>,
 }
 
 pub struct RingReader {
@@ -363,6 +365,7 @@ impl RingWriter {
             inner,
             last_read: read,
             poll_interval,
+            stall_since: None,
         })
     }
 
@@ -473,24 +476,32 @@ impl RingWriter {
                     let wait_res = self.inner.space_avail.wait(wait_timeout);
                     ring_fail_point!("ring_writer::after_space_wait");
                     match wait_res {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            self.stall_since = None;
+                            let new_read = hdr.read.load(Ordering::Acquire);
+                            self.last_read = new_read;
+                        }
                         Err(e) => {
-                            if timeout.is_none() && is_timeout_error(e.as_ref()) {
-                                let new_read = hdr.read.load(Ordering::Acquire);
-                                if new_read == prior_read {
-                                    return Err(IpcError::PeerStalled);
-                                }
-                                self.last_read = new_read;
-                                continue;
+                            if !is_timeout_error(e.as_ref()) {
+                                return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
                             }
-                            if timeout.is_some() && is_timeout_error(e.as_ref()) {
+
+                            if timeout.is_some() {
                                 return Err(IpcError::Timeout);
                             }
-                            return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
+
+                            let new_read = hdr.read.load(Ordering::Acquire);
+                            if new_read == prior_read {
+                                let entry = self.stall_since.get_or_insert_with(Instant::now);
+                                if entry.elapsed() >= STALL_DETECT_THRESHOLD {
+                                    return Err(IpcError::PeerStalled);
+                                }
+                            } else {
+                                self.last_read = new_read;
+                                self.stall_since = None;
+                            }
                         }
                     }
-                    let new_read = hdr.read.load(Ordering::Acquire);
-                    self.last_read = new_read;
                 }
                 Err(e) => return Err(e),
             }
@@ -515,6 +526,7 @@ impl RingWriter {
     /// Set the poll interval used when waiting for space without a timeout.
     pub fn set_poll_interval(&mut self, interval: Duration) {
         self.poll_interval = clamp_interval(interval);
+        self.stall_since = None;
     }
 
     /// Returns the current poll interval for unsignaled waits.
