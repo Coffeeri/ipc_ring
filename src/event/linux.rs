@@ -1,4 +1,5 @@
 use super::EventError;
+use std::convert::TryFrom;
 use std::io;
 use std::mem::size_of;
 use std::ptr;
@@ -115,18 +116,18 @@ fn futex_wake(word: &AtomicU32, count: i32) -> Result<(), EventError> {
 
 fn duration_to_timespec(dur: Duration) -> libc::timespec {
     let secs = dur.as_secs();
-    let tv_sec = if secs > libc::time_t::MAX as u64 {
-        libc::time_t::MAX
-    } else {
-        secs as libc::time_t
-    };
+    let sec_val = libc::time_t::try_from(secs).unwrap_or(libc::time_t::MAX);
 
     let nanos = dur.subsec_nanos();
-    let tv_nsec = if (nanos as u64) > libc::c_long::MAX as u64 {
+    let nanos_u64 = u64::from(nanos);
+    let nsec_val = if nanos_u64 > libc::c_long::MAX as u64 {
         libc::c_long::MAX
     } else {
-        nanos as libc::c_long
+        libc::c_long::try_from(nanos_u64).unwrap_or(libc::c_long::MAX)
     };
 
-    libc::timespec { tv_sec, tv_nsec }
+    libc::timespec {
+        tv_sec: sec_val,
+        tv_nsec: nsec_val,
+    }
 }
