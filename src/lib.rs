@@ -10,9 +10,10 @@
 #![allow(clippy::cast_possible_truncation)] // File sizes and offsets are validated
 #![allow(clippy::multiple_crate_versions)] // Dependency issue, not our code
 
+mod event;
+
+use crate::event::{EventError, EventState, ManualResetEvent, Timeout};
 use memmap2::{MmapMut, MmapOptions};
-use raw_sync::events::{EventInit, EventState};
-use raw_sync::Timeout;
 use std::fs::OpenOptions;
 use std::io;
 use std::mem::{align_of, size_of};
@@ -69,8 +70,8 @@ struct RingMapping {
     #[allow(dead_code)]
     map: MmapMut,
     hdr: *mut Header,
-    data_avail: Box<dyn raw_sync::events::EventImpl>,
-    space_avail: Box<dyn raw_sync::events::EventImpl>,
+    data_avail: ManualResetEvent,
+    space_avail: ManualResetEvent,
     ring_ptr: *mut u8,
     ring_cap: usize,
     mask: usize,
@@ -121,11 +122,11 @@ impl RingMapping {
         off += align_up(size_of::<Header>(), HDR_ALIGN);
 
         // Events (manual-reset=true)
-        let (data_evt, used1) = raw_sync::events::Event::new(base.add(off), true)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+        let (data_evt, used1) =
+            ManualResetEvent::new(base.add(off), true).map_err(|e| IpcError::Event(Box::new(e)))?;
         off += align_up(used1, align_of::<usize>());
-        let (space_evt, used2) = raw_sync::events::Event::new(base.add(off), true)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+        let (space_evt, used2) =
+            ManualResetEvent::new(base.add(off), true).map_err(|e| IpcError::Event(Box::new(e)))?;
         off += align_up(used2, align_of::<usize>());
         off = align_up(off, HDR_ALIGN);
 
@@ -157,11 +158,11 @@ impl RingMapping {
         let hdr_ptr = base.cast::<Header>();
         off += align_up(size_of::<Header>(), HDR_ALIGN);
 
-        let (data_evt, used1) = raw_sync::events::Event::from_existing(base.add(off))
-            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+        let (data_evt, used1) = ManualResetEvent::from_existing(base.add(off))
+            .map_err(|e| IpcError::Event(Box::new(e)))?;
         off += align_up(used1, align_of::<usize>());
-        let (space_evt, used2) = raw_sync::events::Event::from_existing(base.add(off))
-            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+        let (space_evt, used2) = ManualResetEvent::from_existing(base.add(off))
+            .map_err(|e| IpcError::Event(Box::new(e)))?;
         off += align_up(used2, align_of::<usize>());
         off = align_up(off, HDR_ALIGN);
 
@@ -282,29 +283,6 @@ pub enum IpcError {
     Event(Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[derive(Debug)]
-struct SimpleError(String);
-
-impl std::fmt::Display for SimpleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for SimpleError {}
-
-fn to_send_sync_error(err: &dyn std::error::Error) -> Box<dyn std::error::Error + Send + Sync> {
-    Box::new(SimpleError(err.to_string()))
-}
-
-fn is_timeout_error(err: &dyn std::error::Error) -> bool {
-    let msg = err.to_string();
-    msg.contains("timed out")
-        || msg.contains("Timed out")
-        || msg.contains("Failed waiting for signal")
-        || msg.contains("Failed waiting for event")
-}
-
 fn clamp_interval(interval: Duration) -> Duration {
     if interval.is_zero() {
         Duration::from_micros(1)
@@ -339,7 +317,7 @@ impl RingWriter {
     /// - Memory mapping fails
     pub fn create<P: AsRef<Path>>(path: P, cap_pow2: usize) -> Result<Self, IpcError> {
         assert!(cap_pow2.is_power_of_two());
-        let evt_sz = raw_sync::events::Event::size_of(None);
+        let evt_sz = ManualResetEvent::size_of();
         let layout = align_up(size_of::<Header>(), HDR_ALIGN)
             + align_up(evt_sz, align_of::<usize>())
             + align_up(evt_sz, align_of::<usize>())
@@ -422,11 +400,10 @@ impl RingWriter {
             hdr.commit.store(cur_write, Ordering::Release);
             ring_fail_point!("ring_writer::after_wrap_advance");
             // Wake the reader so it can consume the wrap marker promptly
-            let _ = self
-                .inner
+            self.inner
                 .data_avail
                 .set(EventState::Signaled)
-                .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())));
+                .map_err(|e| IpcError::Event(Box::new(e)))?;
             ring_fail_point!("ring_writer::after_wrap_signal");
 
             w = 0; // After wrap marker, next write starts at beginning
@@ -450,7 +427,7 @@ impl RingWriter {
         self.inner
             .data_avail
             .set(EventState::Signaled)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+            .map_err(|e| IpcError::Event(Box::new(e)))?;
         ring_fail_point!("ring_writer::after_data_signal");
         Ok(())
     }
@@ -475,31 +452,25 @@ impl RingWriter {
                     ring_fail_point!("ring_writer::before_space_wait");
                     let wait_res = self.inner.space_avail.wait(wait_timeout);
                     ring_fail_point!("ring_writer::after_space_wait");
-                    match wait_res {
-                        Ok(()) => {
-                            self.stall_since = None;
-                            let new_read = hdr.read.load(Ordering::Acquire);
-                            self.last_read = new_read;
-                        }
-                        Err(e) => {
-                            if !is_timeout_error(e.as_ref()) {
-                                return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
-                            }
 
-                            if timeout.is_some() {
-                                return Err(IpcError::Timeout);
-                            }
+                    let timed_out = match wait_res {
+                        Ok(()) => false,
+                        Err(EventError::Timeout) => true,
+                        Err(EventError::Io(err)) => return Err(IpcError::Event(Box::new(err))),
+                    };
 
-                            let new_read = hdr.read.load(Ordering::Acquire);
-                            if new_read == prior_read {
-                                let entry = self.stall_since.get_or_insert_with(Instant::now);
-                                if entry.elapsed() >= STALL_DETECT_THRESHOLD {
-                                    return Err(IpcError::PeerStalled);
-                                }
-                            } else {
-                                self.last_read = new_read;
-                                self.stall_since = None;
-                            }
+                    if timed_out && timeout.is_some() {
+                        return Err(IpcError::Timeout);
+                    }
+
+                    let new_read = hdr.read.load(Ordering::Acquire);
+                    if new_read != prior_read {
+                        self.last_read = new_read;
+                        self.stall_since = None;
+                    } else if timeout.is_none() {
+                        let entry = self.stall_since.get_or_insert_with(Instant::now);
+                        if entry.elapsed() >= STALL_DETECT_THRESHOLD {
+                            return Err(IpcError::PeerStalled);
                         }
                     }
                 }
@@ -597,7 +568,7 @@ impl RingReader {
             self.inner
                 .space_avail
                 .set(EventState::Signaled)
-                .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+                .map_err(|e| IpcError::Event(Box::new(e)))?;
             ring_fail_point!("ring_reader::after_wrap_space_signal");
             return self.try_pop(out);
         }
@@ -614,7 +585,7 @@ impl RingReader {
         self.inner
             .space_avail
             .set(EventState::Signaled)
-            .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+            .map_err(|e| IpcError::Event(Box::new(e)))?;
         ring_fail_point!("ring_reader::after_space_signal");
         let commit = hdr.commit.load(Ordering::Acquire);
         self.last_commit = commit;
@@ -648,15 +619,12 @@ impl RingReader {
             ring_fail_point!("ring_reader::after_data_wait");
             match wait_res {
                 Ok(()) => {}
-                Err(e) => {
-                    if timeout.is_none() && is_timeout_error(e.as_ref()) {
-                        continue;
-                    }
-                    if timeout.is_some() && is_timeout_error(e.as_ref()) {
+                Err(EventError::Timeout) => {
+                    if timeout.is_some() {
                         return Err(IpcError::Timeout);
                     }
-                    return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
                 }
+                Err(EventError::Io(err)) => return Err(IpcError::Event(Box::new(err))),
             }
         }
     }
@@ -1018,18 +986,6 @@ mod tests {
         let err = writer.try_push(&payload).unwrap_err();
         assert!(matches!(err, IpcError::Full));
         cleanup_ring(&path);
-    }
-
-    #[test]
-    fn test_simple_error_and_converter() {
-        // Cover Display and the to_send_sync_error adapter
-        let e = SimpleError("hello".to_string());
-        assert_eq!(format!("{}", e), "hello");
-        let boxed: Box<dyn std::error::Error> = Box::new(SimpleError("x".to_string()));
-        let send_sync = to_send_sync_error(boxed.as_ref());
-        // Type assertion: must be Send + Sync
-        fn assert_send_sync(_: &(dyn std::error::Error + Send + Sync)) {}
-        assert_send_sync(&*send_sync);
     }
 
     #[test]
