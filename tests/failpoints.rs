@@ -3,6 +3,7 @@
 use ipc_ring::{failpoints_enabled, RingReader, RingWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{mpsc, Arc, Barrier};
 use std::{thread, time::Duration};
 
 const PAYLOAD: &[u8] = b"failpoint message";
@@ -339,6 +340,66 @@ fn writer_wait_failpoints_handle_crash() {
         assert_no_payload_present(&path);
         cleanup(&path);
     }
+}
+
+#[test]
+fn blocking_reader_detects_stale_publish_after_writer_crash() {
+    let _scenario = fail::FailScenario::setup();
+    assert!(failpoints_enabled(), "failpoints feature disabled");
+
+    let path = unique_ring_path();
+    cleanup(&path);
+
+    let mut writer = RingWriter::create(&path, 64).expect("create ring");
+    let barrier = Arc::new(Barrier::new(2));
+    let (tx, rx) = mpsc::channel();
+
+    let reader_barrier = barrier.clone();
+    let reader_path = path.clone();
+    let reader_handle = thread::spawn(move || {
+        let mut reader = RingReader::open(&reader_path).expect("open reader");
+        reader_barrier.wait();
+        let mut buf = Vec::new();
+        match reader.pop(&mut buf, None) {
+            Ok(_) => {
+                tx.send(Some(buf)).expect("send reader payload");
+            }
+            Err(e) => {
+                let _ = tx.send(None);
+                panic!("reader pop error: {e:?}");
+            }
+        }
+    });
+
+    barrier.wait(); // ensure reader is waiting before writer publishes
+
+    let guard = FailpointGuard::new("ring_writer::after_write_advance");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        writer.push(PAYLOAD, None).expect("writer push");
+    }));
+    drop(guard);
+    assert!(
+        result.is_err(),
+        "after_write_advance failpoint did not trigger panic"
+    );
+
+    drop(writer);
+
+    let received = rx
+        .recv_timeout(Duration::from_millis(300))
+        .expect("blocking reader did not resume in time");
+    reader_handle
+        .join()
+        .expect("reader thread should join after delivering payload");
+
+    let payload = received.expect("reader returned no payload");
+    assert_eq!(
+        payload.as_slice(),
+        PAYLOAD,
+        "payload mismatch after writer crash"
+    );
+
+    cleanup(&path);
 }
 
 #[test]

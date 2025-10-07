@@ -26,6 +26,7 @@ use thiserror::Error;
 const MAGIC: u64 = 0x4950_4352_494E_4731; // "IPCRING1"
 const READY: u32 = 1 << 31;
 const HDR_ALIGN: usize = 64;
+const UNSIGNALED_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 #[cfg(feature = "failpoints")]
 macro_rules! ring_fail_point {
@@ -49,10 +50,11 @@ const fn align_up(x: usize, a: usize) -> usize {
 #[repr(C)]
 struct Header {
     magic: u64,
-    cap: u64,         // ring capacity in bytes (power of two)
-    write: AtomicU64, // monotonically increasing
-    read: AtomicU64,  // monotonically increasing
-    _pad: [u8; 64 - 8 - 8 - 8 - 8],
+    cap: u64,          // ring capacity in bytes (power of two)
+    write: AtomicU64,  // monotonically increasing
+    read: AtomicU64,   // monotonically increasing
+    commit: AtomicU64, // last published write index
+    _pad: [u8; 64 - 8 - 8 - 8 - 8 - 8],
 }
 
 // Common mapping state, owned by both writer and reader.
@@ -77,6 +79,7 @@ pub struct RingWriter {
 
 pub struct RingReader {
     inner: RingMapping,
+    last_commit: u64,
 }
 
 #[cfg(feature = "failpoints")]
@@ -109,7 +112,8 @@ impl RingMapping {
                 cap: cap as u64,
                 write: AtomicU64::new(0),
                 read: AtomicU64::new(0),
-                _pad: [0; 64 - 32],
+                commit: AtomicU64::new(0),
+                _pad: [0; 64 - 40],
             },
         );
         off += align_up(size_of::<Header>(), HDR_ALIGN);
@@ -287,6 +291,13 @@ fn to_send_sync_error(err: &dyn std::error::Error) -> Box<dyn std::error::Error 
     Box::new(SimpleError(err.to_string()))
 }
 
+fn is_timeout_error(err: &dyn std::error::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("timed out")
+        || msg.contains("Timed out")
+        || msg.contains("Failed waiting for signal")
+}
+
 impl RingWriter {
     /// Create a new ring mapping at `path`. Fails if the file exists.
     ///
@@ -374,6 +385,7 @@ impl RingWriter {
             ring_fail_point!("ring_writer::after_wrap_publish");
             cur_write = cur_write.wrapping_add(gap);
             hdr.write.store(cur_write, Ordering::Release);
+            hdr.commit.store(cur_write, Ordering::Release);
             ring_fail_point!("ring_writer::after_wrap_advance");
             // Wake the reader so it can consume the wrap marker promptly
             let _ = self
@@ -397,6 +409,7 @@ impl RingWriter {
         let bump = align_up(4 + payload.len(), 4) as u64;
         cur_write = cur_write.wrapping_add(bump);
         hdr.write.store(cur_write, Ordering::Release);
+        hdr.commit.store(cur_write, Ordering::Release);
         ring_fail_point!("ring_writer::after_write_advance");
 
         // Signal data available
@@ -467,8 +480,12 @@ impl RingReader {
         // Reconstruct layout
         unsafe {
             let inner = RingMapping::from_existing(map)?;
+            let commit = (&*inner.hdr).commit.load(Ordering::Acquire);
             ring_fail_point!("ring_reader::open::after_map");
-            Ok(Self { inner })
+            Ok(Self {
+                inner,
+                last_commit: commit,
+            })
         }
     }
 
@@ -522,6 +539,8 @@ impl RingReader {
             .set(EventState::Signaled)
             .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
         ring_fail_point!("ring_reader::after_space_signal");
+        let commit = hdr.commit.load(Ordering::Acquire);
+        self.last_commit = commit;
         Ok(Some(size))
     }
 
@@ -537,13 +556,29 @@ impl RingReader {
             if let Some(n) = self.try_pop(out)? {
                 return Ok(n);
             }
-            let to = timeout.map_or(Timeout::Infinite, Timeout::Val);
+
+            let hdr = unsafe { &*self.inner.hdr };
+            let commit_now = hdr.commit.load(Ordering::Acquire);
+            if commit_now != self.last_commit {
+                // Writer advanced without signaling; re-check immediately.
+                continue;
+            }
+
+            let wait_timeout = timeout
+                .map(Timeout::Val)
+                .unwrap_or(Timeout::Val(UNSIGNALED_POLL_INTERVAL));
             ring_fail_point!("ring_reader::before_data_wait");
-            self.inner
-                .data_avail
-                .wait(to)
-                .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+            let wait_res = self.inner.data_avail.wait(wait_timeout);
             ring_fail_point!("ring_reader::after_data_wait");
+            match wait_res {
+                Ok(()) => {}
+                Err(e) => {
+                    if timeout.is_none() && is_timeout_error(e.as_ref()) {
+                        continue;
+                    }
+                    return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
+                }
+            }
         }
     }
 }
