@@ -77,6 +77,8 @@ struct RingMapping {
 
 pub struct RingWriter {
     inner: RingMapping,
+    last_read: u64,
+    poll_interval: Duration,
 }
 
 pub struct RingReader {
@@ -299,6 +301,7 @@ fn is_timeout_error(err: &dyn std::error::Error) -> bool {
     msg.contains("timed out")
         || msg.contains("Timed out")
         || msg.contains("Failed waiting for signal")
+        || msg.contains("Failed waiting for event")
 }
 
 fn clamp_interval(interval: Duration) -> Duration {
@@ -354,8 +357,14 @@ impl RingWriter {
         // `file` can be dropped after mapping; mapping remains valid until unmapped.
         drop(file);
         let inner = unsafe { RingMapping::init_new(map, cap_pow2) }?;
+        let read = unsafe { (&*inner.hdr).read.load(Ordering::Acquire) };
+        let poll_interval = default_poll_interval();
         ring_fail_point!("ring_writer::create::after_init");
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            last_read: read,
+            poll_interval,
+        })
     }
 
     /// Try to push without blocking.
@@ -382,6 +391,7 @@ impl RingWriter {
 
         let hdr = unsafe { &*self.inner.hdr };
         let read = hdr.read.load(Ordering::Acquire);
+        self.last_read = read;
         let mut cur_write = hdr.write.load(Ordering::Relaxed);
         let used = cur_write - read;
         let space = self.inner.ring_cap as u64 - used;
@@ -456,13 +466,29 @@ impl RingWriter {
             match self.try_push(payload) {
                 Ok(()) => return Ok(()),
                 Err(IpcError::Full) => {
-                    let to = timeout.map_or(Timeout::Infinite, Timeout::Val);
+                    let hdr = unsafe { &*self.inner.hdr };
+                    let prior_read = self.last_read;
+                    let wait_timeout = timeout
+                        .map(Timeout::Val)
+                        .unwrap_or_else(|| Timeout::Val(self.poll_interval));
                     ring_fail_point!("ring_writer::before_space_wait");
-                    self.inner
-                        .space_avail
-                        .wait(to)
-                        .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+                    let wait_res = self.inner.space_avail.wait(wait_timeout);
                     ring_fail_point!("ring_writer::after_space_wait");
+                    match wait_res {
+                        Ok(()) => {}
+                        Err(e) => {
+                            if timeout.is_none() && is_timeout_error(e.as_ref()) {
+                                let new_read = hdr.read.load(Ordering::Acquire);
+                                if new_read != prior_read {
+                                    self.last_read = new_read;
+                                }
+                                continue;
+                            }
+                            return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
+                        }
+                    }
+                    let new_read = hdr.read.load(Ordering::Acquire);
+                    self.last_read = new_read;
                 }
                 Err(e) => return Err(e),
             }
@@ -480,6 +506,18 @@ impl RingWriter {
     #[inline]
     fn write_payload(&self, w: usize, data: &[u8]) {
         self.inner.write_payload(w, data);
+    }
+}
+
+impl RingWriter {
+    /// Set the poll interval used when waiting for space without a timeout.
+    pub fn set_poll_interval(&mut self, interval: Duration) {
+        self.poll_interval = clamp_interval(interval);
+    }
+
+    /// Returns the current poll interval for unsignaled waits.
+    pub fn poll_interval(&self) -> Duration {
+        self.poll_interval
     }
 }
 
