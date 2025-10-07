@@ -92,14 +92,9 @@ unsafe impl Send for RingWriter {}
 #[cfg(feature = "failpoints")]
 unsafe impl Send for RingReader {}
 
-#[cfg(feature = "failpoints")]
+#[must_use]
 pub const fn failpoints_enabled() -> bool {
-    true
-}
-
-#[cfg(not(feature = "failpoints"))]
-pub const fn failpoints_enabled() -> bool {
-    false
+    cfg!(feature = "failpoints")
 }
 
 impl RingMapping {
@@ -472,9 +467,8 @@ impl RingWriter {
                 Err(IpcError::Full) => {
                     let hdr = unsafe { &*self.inner.hdr };
                     let prior_read = self.last_read;
-                    let wait_timeout = timeout
-                        .map(Timeout::Val)
-                        .unwrap_or_else(|| Timeout::Val(self.poll_interval));
+                    let wait_timeout =
+                        timeout.map_or_else(|| Timeout::Val(self.poll_interval), Timeout::Val);
                     ring_fail_point!("ring_writer::before_space_wait");
                     let wait_res = self.inner.space_avail.wait(wait_timeout);
                     ring_fail_point!("ring_writer::after_space_wait");
@@ -483,11 +477,10 @@ impl RingWriter {
                         Err(e) => {
                             if timeout.is_none() && is_timeout_error(e.as_ref()) {
                                 let new_read = hdr.read.load(Ordering::Acquire);
-                                if new_read != prior_read {
-                                    self.last_read = new_read;
-                                } else {
+                                if new_read == prior_read {
                                     return Err(IpcError::PeerStalled);
                                 }
+                                self.last_read = new_read;
                                 continue;
                             }
                             if timeout.is_some() && is_timeout_error(e.as_ref()) {
@@ -525,6 +518,7 @@ impl RingWriter {
     }
 
     /// Returns the current poll interval for unsignaled waits.
+    #[must_use]
     pub fn poll_interval(&self) -> Duration {
         self.poll_interval
     }
@@ -635,9 +629,8 @@ impl RingReader {
                 continue;
             }
 
-            let wait_timeout = timeout
-                .map(Timeout::Val)
-                .unwrap_or_else(|| Timeout::Val(self.poll_interval));
+            let wait_timeout =
+                timeout.map_or_else(|| Timeout::Val(self.poll_interval), Timeout::Val);
             ring_fail_point!("ring_reader::before_data_wait");
             let wait_res = self.inner.data_avail.wait(wait_timeout);
             ring_fail_point!("ring_reader::after_data_wait");
@@ -664,6 +657,7 @@ impl RingReader {
     }
 
     /// Returns the current poll interval.
+    #[must_use]
     pub fn poll_interval(&self) -> Duration {
         self.poll_interval
     }
