@@ -48,6 +48,9 @@ jobs:
     - name: Run tests
       run: cargo test
 
+    - name: Run failpoint tests
+      run: cargo test --features failpoints --test failpoints
+
     - name: Build release
       run: cargo build --release
 
