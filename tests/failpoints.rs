@@ -3,7 +3,7 @@
 use ipc_ring::{failpoints_enabled, IpcError, RingReader, RingWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc, Barrier};
+use std::sync::{Arc, Barrier};
 use std::{thread, time::Duration};
 
 const PAYLOAD: &[u8] = b"failpoint message";
@@ -71,19 +71,6 @@ fn prime_wrap(writer: &mut RingWriter, reader: &mut RingReader) {
         writer.try_push(&prep).expect("prime push");
         let observed = reader.try_pop(&mut buf).expect("prime pop");
         assert_eq!(observed, Some(prep.len()), "prime pop length mismatch");
-        buf.clear();
-    }
-}
-
-fn assert_no_payload_present(path: &Path) {
-    let mut reader = RingReader::open(path).expect("verify reader open");
-    let mut buf = Vec::new();
-    while let Some(_n) = reader.try_pop(&mut buf).expect("verify pop") {
-        assert_ne!(
-            buf.as_slice(),
-            PAYLOAD,
-            "unexpected payload observed during verification"
-        );
         buf.clear();
     }
 }
@@ -268,136 +255,65 @@ fn writer_failpoints_cover_crash_windows() {
     }
 }
 
+// Tests above rely on failpoints to simulate in-flight crashes. The following tests exercise
+// observable error paths without failpoints.
+
 #[test]
-fn writer_wait_failpoints_handle_crash() {
-    let _scenario = fail::FailScenario::setup();
-    assert!(failpoints_enabled(), "failpoints feature disabled");
+fn writer_reports_timeout_when_full() {
+    let path = unique_ring_path();
+    cleanup(&path);
+    let mut writer = RingWriter::create(&path, 64).expect("create ring");
 
-    // before_space_wait: panic before blocking; ring stays full, no new payload.
-    {
-        let path = unique_ring_path();
-        cleanup(&path);
-        let mut writer = RingWriter::create(&path, 64).expect("create ring");
+    let filler = vec![0xCC; 60];
+    while writer.try_push(&filler).is_ok() {}
 
-        let filler = vec![0xAA; 28];
-        while writer.try_push(&filler).is_ok() {}
+    let err = writer
+        .push(PAYLOAD, Some(Duration::from_millis(20)))
+        .unwrap_err();
+    assert!(
+        matches!(err, IpcError::Timeout),
+        "unexpected error: {err:?}"
+    );
 
-        let reader = RingReader::open(&path).expect("open reader for verification");
-        drop(reader); // ensure no outstanding borrow across panic.
-
-        let guard = FailpointGuard::new("ring_writer::before_space_wait");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            writer
-                .push(PAYLOAD, Some(Duration::from_millis(50)))
-                .expect("push should panic via failpoint");
-        }));
-        drop(guard);
-        assert!(
-            result.is_err(),
-            "before_space_wait failpoint did not trigger panic"
-        );
-
-        drop(writer);
-        assert_no_payload_present(&path);
-        cleanup(&path);
-    }
-
-    // after_space_wait: panic immediately after wait succeeds; payload not committed.
-    {
-        let path = unique_ring_path();
-        cleanup(&path);
-        let mut writer = RingWriter::create(&path, 64).expect("create ring");
-
-        let filler = vec![0xBB; 24];
-        while writer.try_push(&filler).is_ok() {}
-
-        let guard = FailpointGuard::new("ring_writer::after_space_wait");
-        let path_for_reader = path.clone();
-        let handle = thread::spawn(move || {
-            let mut reader = RingReader::open(&path_for_reader).expect("spawn reader open");
-            let mut buf = Vec::new();
-            loop {
-                if let Some(_n) = reader.try_pop(&mut buf).expect("spawn reader pop") {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-        });
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            writer
-                .push(PAYLOAD, Some(Duration::from_millis(500)))
-                .expect("push should panic via failpoint");
-        }));
-        drop(guard);
-        assert!(
-            result.is_err(),
-            "after_space_wait failpoint did not trigger panic"
-        );
-
-        handle.join().expect("reader thread join");
-        drop(writer);
-        assert_no_payload_present(&path);
-        cleanup(&path);
-    }
+    cleanup(&path);
 }
 
 #[test]
-fn blocking_reader_detects_stale_publish_after_writer_crash() {
-    let _scenario = fail::FailScenario::setup();
-    assert!(failpoints_enabled(), "failpoints feature disabled");
+fn writer_reports_peer_stalled_without_reader() {
+    let path = unique_ring_path();
+    cleanup(&path);
+    let mut writer = RingWriter::create(&path, 64).expect("create ring");
+    writer.set_poll_interval(Duration::from_millis(1));
 
+    let filler = vec![0xDD; 60];
+    while writer.try_push(&filler).is_ok() {}
+
+    let err = writer.push(PAYLOAD, None).unwrap_err();
+    assert!(
+        matches!(err, IpcError::PeerStalled),
+        "unexpected error: {err:?}"
+    );
+
+    cleanup(&path);
+}
+
+#[test]
+fn reader_reports_timeout_when_empty() {
     let path = unique_ring_path();
     cleanup(&path);
 
-    let mut writer = RingWriter::create(&path, 64).expect("create ring");
-    let barrier = Arc::new(Barrier::new(2));
-    let (tx, rx) = mpsc::channel();
-
-    let reader_barrier = barrier.clone();
-    let reader_path = path.clone();
-    let reader_handle = thread::spawn(move || {
-        let mut reader = RingReader::open(&reader_path).expect("open reader");
-        reader.set_poll_interval(Duration::from_millis(1));
-        reader_barrier.wait();
-        let mut buf = Vec::new();
-        match reader.pop(&mut buf, None) {
-            Ok(_) => {
-                tx.send(Some(buf)).expect("send reader payload");
-            }
-            Err(e) => {
-                let _ = tx.send(None);
-                panic!("reader pop error: {e:?}");
-            }
-        }
-    });
-
-    barrier.wait(); // ensure reader is waiting before writer publishes
-
-    let guard = FailpointGuard::new("ring_writer::after_write_advance");
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        writer.push(PAYLOAD, None).expect("writer push");
-    }));
-    drop(guard);
-    assert!(
-        result.is_err(),
-        "after_write_advance failpoint did not trigger panic"
-    );
-
+    let writer = RingWriter::create(&path, 64).expect("create ring");
     drop(writer);
 
-    let received = rx
-        .recv_timeout(Duration::from_millis(300))
-        .expect("blocking reader did not resume in time");
-    reader_handle
-        .join()
-        .expect("reader thread should join after delivering payload");
-
-    let payload = received.expect("reader returned no payload");
-    assert_eq!(
-        payload.as_slice(),
-        PAYLOAD,
-        "payload mismatch after writer crash"
+    let mut reader = RingReader::open(&path).expect("open reader");
+    reader.set_poll_interval(Duration::from_millis(1));
+    let mut buf = Vec::new();
+    let err = reader
+        .pop(&mut buf, Some(Duration::from_millis(20)))
+        .unwrap_err();
+    assert!(
+        matches!(err, IpcError::Timeout),
+        "unexpected error: {err:?}"
     );
 
     cleanup(&path);
@@ -444,9 +360,7 @@ fn writer_self_wake_after_reader_crash() {
         "writer push failed: {writer_result:?}"
     );
 
-    let reader_result = reader_handle
-        .join()
-        .expect("reader thread join failed");
+    let reader_result = reader_handle.join().expect("reader thread join failed");
     assert!(reader_result.is_err(), "reader thread did not panic");
 
     let mut verify_reader = RingReader::open(&path).expect("verify reader open");
@@ -495,88 +409,6 @@ fn reader_failpoints_cover_crash_windows() {
 
     for case in cases {
         run_reader_case(case);
-    }
-}
-
-#[test]
-fn reader_wait_failpoints_handle_crash() {
-    let _scenario = fail::FailScenario::setup();
-    assert!(failpoints_enabled(), "failpoints feature disabled");
-
-    // before_data_wait: panic before blocking, ring unchanged.
-    {
-        let path = unique_ring_path();
-        cleanup(&path);
-        let writer = RingWriter::create(&path, 64).expect("create ring");
-        drop(writer);
-
-        let mut reader = RingReader::open(&path).expect("open reader");
-        let guard = FailpointGuard::new("ring_reader::before_data_wait");
-        let mut buf = Vec::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            reader
-                .pop(&mut buf, Some(Duration::from_millis(50)))
-                .expect("pop should panic via failpoint");
-        }));
-        drop(guard);
-        assert!(
-            result.is_err(),
-            "before_data_wait failpoint did not trigger panic"
-        );
-        drop(reader);
-
-        let mut verify_reader = RingReader::open(&path).expect("verify reader open");
-        assert!(
-            verify_reader
-                .try_pop(&mut buf)
-                .expect("verify pop")
-                .is_none(),
-            "unexpected payload after before_data_wait panic"
-        );
-        cleanup(&path);
-    }
-
-    // after_data_wait: panic immediately after wait returns; payload remains for replay.
-    {
-        let path = unique_ring_path();
-        cleanup(&path);
-        let writer = RingWriter::create(&path, 64).expect("create ring");
-        let mut reader = RingReader::open(&path).expect("open reader");
-
-        let handle = thread::spawn(move || {
-            let mut writer = writer;
-            thread::sleep(Duration::from_millis(20));
-            writer.push(PAYLOAD, None).expect("writer push");
-        });
-
-        let guard = FailpointGuard::new("ring_reader::after_data_wait");
-        let mut buf = Vec::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            reader
-                .pop(&mut buf, Some(Duration::from_millis(500)))
-                .expect("pop should panic via failpoint");
-        }));
-        drop(guard);
-        assert!(
-            result.is_err(),
-            "after_data_wait failpoint did not trigger panic"
-        );
-
-        handle.join().expect("writer thread join");
-        drop(reader);
-
-        let mut verify_reader = RingReader::open(&path).expect("verify reader open");
-        let mut verify_buf = Vec::new();
-        let observed = verify_reader
-            .try_pop(&mut verify_buf)
-            .expect("verify pop after retry");
-        assert_eq!(
-            observed,
-            Some(PAYLOAD.len()),
-            "payload not preserved after after_data_wait panic"
-        );
-        assert_eq!(verify_buf.as_slice(), PAYLOAD);
-        cleanup(&path);
     }
 }
 

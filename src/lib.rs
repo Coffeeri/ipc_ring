@@ -277,6 +277,10 @@ pub enum IpcError {
     Full,
     #[error("message too large")]
     TooLarge,
+    #[error("wait timed out")]
+    Timeout,
+    #[error("peer likely crashed or is unresponsive")]
+    PeerStalled,
     #[error("event error: {0}")]
     Event(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -481,8 +485,13 @@ impl RingWriter {
                                 let new_read = hdr.read.load(Ordering::Acquire);
                                 if new_read != prior_read {
                                     self.last_read = new_read;
+                                } else {
+                                    return Err(IpcError::PeerStalled);
                                 }
                                 continue;
+                            }
+                            if timeout.is_some() && is_timeout_error(e.as_ref()) {
+                                return Err(IpcError::Timeout);
                             }
                             return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
                         }
@@ -637,6 +646,9 @@ impl RingReader {
                 Err(e) => {
                     if timeout.is_none() && is_timeout_error(e.as_ref()) {
                         continue;
+                    }
+                    if timeout.is_some() && is_timeout_error(e.as_ref()) {
+                        return Err(IpcError::Timeout);
                     }
                     return Err(IpcError::Event(to_send_sync_error(e.as_ref())));
                 }
