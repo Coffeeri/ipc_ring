@@ -560,10 +560,10 @@ impl RingReader {
             let bump = (self.inner.ring_cap - r) as u64;
             hdr.read.store(read + bump, Ordering::Release);
             ring_fail_point!("ring_reader::after_wrap_read_advance");
-        self.inner
-            .space_avail
-            .signal()
-            .map_err(|e| IpcError::Event(Box::new(e)))?;
+            self.inner
+                .space_avail
+                .signal()
+                .map_err(|e| IpcError::Event(Box::new(e)))?;
             ring_fail_point!("ring_reader::after_wrap_space_signal");
             return self.try_pop(out);
         }
