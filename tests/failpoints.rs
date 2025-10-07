@@ -358,6 +358,7 @@ fn blocking_reader_detects_stale_publish_after_writer_crash() {
     let reader_path = path.clone();
     let reader_handle = thread::spawn(move || {
         let mut reader = RingReader::open(&reader_path).expect("open reader");
+        reader.set_poll_interval(Duration::from_millis(1));
         reader_barrier.wait();
         let mut buf = Vec::new();
         match reader.pop(&mut buf, None) {

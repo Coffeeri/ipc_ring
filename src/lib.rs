@@ -20,13 +20,15 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 use thiserror::Error;
 
 const MAGIC: u64 = 0x4950_4352_494E_4731; // "IPCRING1"
 const READY: u32 = 1 << 31;
 const HDR_ALIGN: usize = 64;
-const UNSIGNALED_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const DEFAULT_POLL_INTERVAL_MS: u64 = 2;
+static POLL_INTERVAL_DEFAULT: OnceLock<Duration> = OnceLock::new();
 
 #[cfg(feature = "failpoints")]
 macro_rules! ring_fail_point {
@@ -80,6 +82,7 @@ pub struct RingWriter {
 pub struct RingReader {
     inner: RingMapping,
     last_commit: u64,
+    poll_interval: Duration,
 }
 
 #[cfg(feature = "failpoints")]
@@ -298,6 +301,25 @@ fn is_timeout_error(err: &dyn std::error::Error) -> bool {
         || msg.contains("Failed waiting for signal")
 }
 
+fn clamp_interval(interval: Duration) -> Duration {
+    if interval.is_zero() {
+        Duration::from_micros(1)
+    } else {
+        interval
+    }
+}
+
+fn default_poll_interval() -> Duration {
+    *POLL_INTERVAL_DEFAULT.get_or_init(|| {
+        let from_env = std::env::var("IPC_RING_POLL_MS")
+            .ok()
+            .and_then(|val| val.parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+            .map(Duration::from_millis);
+        clamp_interval(from_env.unwrap_or_else(|| Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)))
+    })
+}
+
 impl RingWriter {
     /// Create a new ring mapping at `path`. Fails if the file exists.
     ///
@@ -481,10 +503,12 @@ impl RingReader {
         unsafe {
             let inner = RingMapping::from_existing(map)?;
             let commit = (&*inner.hdr).commit.load(Ordering::Acquire);
+            let poll_interval = default_poll_interval();
             ring_fail_point!("ring_reader::open::after_map");
             Ok(Self {
                 inner,
                 last_commit: commit,
+                poll_interval,
             })
         }
     }
@@ -566,7 +590,7 @@ impl RingReader {
 
             let wait_timeout = timeout
                 .map(Timeout::Val)
-                .unwrap_or(Timeout::Val(UNSIGNALED_POLL_INTERVAL));
+                .unwrap_or_else(|| Timeout::Val(self.poll_interval));
             ring_fail_point!("ring_reader::before_data_wait");
             let wait_res = self.inner.data_avail.wait(wait_timeout);
             ring_fail_point!("ring_reader::after_data_wait");
@@ -580,6 +604,18 @@ impl RingReader {
                 }
             }
         }
+    }
+}
+
+impl RingReader {
+    /// Set the poll interval used when waiting without a timeout. Durations smaller than 1µs are clamped.
+    pub fn set_poll_interval(&mut self, interval: Duration) {
+        self.poll_interval = clamp_interval(interval);
+    }
+
+    /// Returns the current poll interval.
+    pub fn poll_interval(&self) -> Duration {
+        self.poll_interval
     }
 }
 
