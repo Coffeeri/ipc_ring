@@ -27,6 +27,20 @@ const MAGIC: u64 = 0x4950_4352_494E_4731; // "IPCRING1"
 const READY: u32 = 1 << 31;
 const HDR_ALIGN: usize = 64;
 
+#[cfg(feature = "failpoints")]
+macro_rules! ring_fail_point {
+    ($name:literal) => {
+        fail::fail_point!($name);
+    };
+}
+
+#[cfg(not(feature = "failpoints"))]
+macro_rules! ring_fail_point {
+    ($name:literal) => {
+        let _ = $name;
+    };
+}
+
 #[inline]
 const fn align_up(x: usize, a: usize) -> usize {
     (x + a - 1) & !(a - 1)
@@ -63,6 +77,21 @@ pub struct RingWriter {
 
 pub struct RingReader {
     inner: RingMapping,
+}
+
+#[cfg(feature = "failpoints")]
+unsafe impl Send for RingWriter {}
+#[cfg(feature = "failpoints")]
+unsafe impl Send for RingReader {}
+
+#[cfg(feature = "failpoints")]
+pub const fn failpoints_enabled() -> bool {
+    true
+}
+
+#[cfg(not(feature = "failpoints"))]
+pub const fn failpoints_enabled() -> bool {
+    false
 }
 
 impl RingMapping {
@@ -292,6 +321,7 @@ impl RingWriter {
         // `file` can be dropped after mapping; mapping remains valid until unmapped.
         drop(file);
         let inner = unsafe { RingMapping::init_new(map, cap_pow2) }?;
+        ring_fail_point!("ring_writer::create::after_init");
         Ok(Self { inner })
     }
 
@@ -341,32 +371,40 @@ impl RingWriter {
             // Emit wrap marker and advance write pointer to start
             self.write_header(w, 0);
             self.publish_header(w, 0);
+            ring_fail_point!("ring_writer::after_wrap_publish");
             cur_write = cur_write.wrapping_add(gap);
             hdr.write.store(cur_write, Ordering::Release);
+            ring_fail_point!("ring_writer::after_wrap_advance");
             // Wake the reader so it can consume the wrap marker promptly
             let _ = self
                 .inner
                 .data_avail
                 .set(EventState::Signaled)
                 .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())));
+            ring_fail_point!("ring_writer::after_wrap_signal");
 
             w = 0; // After wrap marker, next write starts at beginning
         }
 
         // Write header (no READY), copy payload, then publish (set READY)
         self.write_header(w, payload.len() as u32);
+        ring_fail_point!("ring_writer::after_write_header");
         self.write_payload(w + 4, payload);
+        ring_fail_point!("ring_writer::after_write_payload");
         self.publish_header(w, payload.len() as u32);
+        ring_fail_point!("ring_writer::after_publish_header");
 
         let bump = align_up(4 + payload.len(), 4) as u64;
         cur_write = cur_write.wrapping_add(bump);
         hdr.write.store(cur_write, Ordering::Release);
+        ring_fail_point!("ring_writer::after_write_advance");
 
         // Signal data available
         self.inner
             .data_avail
             .set(EventState::Signaled)
             .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+        ring_fail_point!("ring_writer::after_data_signal");
         Ok(())
     }
 
@@ -384,10 +422,12 @@ impl RingWriter {
                 Ok(()) => return Ok(()),
                 Err(IpcError::Full) => {
                     let to = timeout.map_or(Timeout::Infinite, Timeout::Val);
+                    ring_fail_point!("ring_writer::before_space_wait");
                     self.inner
                         .space_avail
                         .wait(to)
                         .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+                    ring_fail_point!("ring_writer::after_space_wait");
                 }
                 Err(e) => return Err(e),
             }
@@ -427,6 +467,7 @@ impl RingReader {
         // Reconstruct layout
         unsafe {
             let inner = RingMapping::from_existing(map)?;
+            ring_fail_point!("ring_reader::open::after_map");
             Ok(Self { inner })
         }
     }
@@ -458,24 +499,29 @@ impl RingReader {
             // Wrap marker
             let bump = (self.inner.ring_cap - r) as u64;
             hdr.read.store(read + bump, Ordering::Release);
+            ring_fail_point!("ring_reader::after_wrap_read_advance");
             self.inner
                 .space_avail
                 .set(EventState::Signaled)
                 .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+            ring_fail_point!("ring_reader::after_wrap_space_signal");
             return self.try_pop(out);
         }
 
         out.resize(size, 0);
         self.inner.read_payload(r + 4, &mut out[..]);
+        ring_fail_point!("ring_reader::before_read_advance");
 
         let bump = align_up(4 + size, 4) as u64;
         hdr.read.store(read + bump, Ordering::Release);
+        ring_fail_point!("ring_reader::after_read_advance");
 
         // Signal writer that there is room
         self.inner
             .space_avail
             .set(EventState::Signaled)
             .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+        ring_fail_point!("ring_reader::after_space_signal");
         Ok(Some(size))
     }
 
@@ -492,10 +538,12 @@ impl RingReader {
                 return Ok(n);
             }
             let to = timeout.map_or(Timeout::Infinite, Timeout::Val);
+            ring_fail_point!("ring_reader::before_data_wait");
             self.inner
                 .data_avail
                 .wait(to)
                 .map_err(|e| IpcError::Event(to_send_sync_error(e.as_ref())))?;
+            ring_fail_point!("ring_reader::after_data_wait");
         }
     }
 }
