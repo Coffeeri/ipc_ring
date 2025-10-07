@@ -1,4 +1,4 @@
-use super::{EventError, EventState, Timeout};
+use super::EventError;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,8 +22,7 @@ impl ManualResetEvent {
         std::mem::size_of::<EventMem>()
     }
 
-    #[allow(clippy::unnecessary_wraps)]
-    pub unsafe fn new(ptr: *mut u8, _manual_reset: bool) -> Result<(Self, usize), EventError> {
+    pub unsafe fn new(ptr: *mut u8, _manual_reset: bool) -> (Self, usize) {
         let mem = ptr.cast::<EventMem>();
         std::ptr::write(
             mem,
@@ -31,13 +30,12 @@ impl ManualResetEvent {
                 state: AtomicU32::new(0),
             },
         );
-        Ok((Self { mem }, Self::size_of()))
+        (Self { mem }, Self::size_of())
     }
 
-    #[allow(clippy::unnecessary_wraps)]
-    pub unsafe fn from_existing(ptr: *mut u8) -> Result<(Self, usize), EventError> {
+    pub unsafe fn from_existing(ptr: *mut u8) -> (Self, usize) {
         let mem = ptr.cast::<EventMem>();
-        Ok((Self { mem }, Self::size_of()))
+        (Self { mem }, Self::size_of())
     }
 
     #[inline]
@@ -46,26 +44,23 @@ impl ManualResetEvent {
     }
 
     #[allow(clippy::unnecessary_wraps)]
-    pub fn set(&self, state: EventState) -> Result<(), EventError> {
-        match state {
-            EventState::Clear => self.state().store(0, Ordering::Release),
-            EventState::Signaled => self.state().store(1, Ordering::Release),
-        }
+    pub fn signal(&self) -> Result<(), EventError> {
+        self.state().store(1, Ordering::Release);
         Ok(())
     }
 
-    pub fn wait(&self, timeout: Timeout) -> Result<(), EventError> {
+    pub fn wait(&self, timeout: Option<Duration>) -> Result<(), EventError> {
         match timeout {
-            Timeout::Infinite => loop {
-                if self.state().load(Ordering::Acquire) != 0 {
+            None => loop {
+                if self.state().swap(0, Ordering::AcqRel) != 0 {
                     return Ok(());
                 }
                 thread::sleep(SLEEP_STEP);
             },
-            Timeout::Val(duration) => {
+            Some(duration) => {
                 let start = Instant::now();
                 loop {
-                    if self.state().load(Ordering::Acquire) != 0 {
+                    if self.state().swap(0, Ordering::AcqRel) != 0 {
                         return Ok(());
                     }
                     if start.elapsed() >= duration {

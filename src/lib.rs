@@ -12,7 +12,7 @@
 
 mod event;
 
-use crate::event::{EventError, EventState, ManualResetEvent, Timeout};
+use crate::event::{EventError, ManualResetEvent};
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
 use std::io;
@@ -102,7 +102,7 @@ pub const fn failpoints_enabled() -> bool {
 
 impl RingMapping {
     /// Initialize a brand new mapping: writes header, constructs events, aligns ring, etc.
-    unsafe fn init_new(mut map: MmapMut, cap: usize) -> Result<Self, IpcError> {
+    unsafe fn init_new(mut map: MmapMut, cap: usize) -> Self {
         let base = map.as_mut_ptr();
         let mut off = 0usize;
 
@@ -122,18 +122,16 @@ impl RingMapping {
         off += align_up(size_of::<Header>(), HDR_ALIGN);
 
         // Events (manual-reset=true)
-        let (data_evt, used1) =
-            ManualResetEvent::new(base.add(off), true).map_err(|e| IpcError::Event(Box::new(e)))?;
+        let (data_evt, used1) = ManualResetEvent::new(base.add(off), true);
         off += align_up(used1, align_of::<usize>());
-        let (space_evt, used2) =
-            ManualResetEvent::new(base.add(off), true).map_err(|e| IpcError::Event(Box::new(e)))?;
+        let (space_evt, used2) = ManualResetEvent::new(base.add(off), true);
         off += align_up(used2, align_of::<usize>());
         off = align_up(off, HDR_ALIGN);
 
         let ring_ptr = base.add(off);
         let ring_cap = align_up(cap, HDR_ALIGN);
 
-        Ok(Self {
+        Self {
             map,
             hdr: hdr_ptr,
             data_avail: data_evt,
@@ -141,7 +139,7 @@ impl RingMapping {
             ring_ptr,
             ring_cap,
             mask: ring_cap - 1,
-        })
+        }
     }
 
     /// Reconstruct an existing mapping: validates header, reopens events, derives ring.
@@ -158,11 +156,9 @@ impl RingMapping {
         let hdr_ptr = base.cast::<Header>();
         off += align_up(size_of::<Header>(), HDR_ALIGN);
 
-        let (data_evt, used1) = ManualResetEvent::from_existing(base.add(off))
-            .map_err(|e| IpcError::Event(Box::new(e)))?;
+        let (data_evt, used1) = ManualResetEvent::from_existing(base.add(off));
         off += align_up(used1, align_of::<usize>());
-        let (space_evt, used2) = ManualResetEvent::from_existing(base.add(off))
-            .map_err(|e| IpcError::Event(Box::new(e)))?;
+        let (space_evt, used2) = ManualResetEvent::from_existing(base.add(off));
         off += align_up(used2, align_of::<usize>());
         off = align_up(off, HDR_ALIGN);
 
@@ -335,7 +331,7 @@ impl RingWriter {
         let map = unsafe { MmapOptions::new().len(layout).map_mut(&file)? };
         // `file` can be dropped after mapping; mapping remains valid until unmapped.
         drop(file);
-        let inner = unsafe { RingMapping::init_new(map, cap_pow2) }?;
+        let inner = unsafe { RingMapping::init_new(map, cap_pow2) };
         let read = unsafe { (&*inner.hdr).read.load(Ordering::Acquire) };
         let poll_interval = default_poll_interval();
         ring_fail_point!("ring_writer::create::after_init");
@@ -402,7 +398,7 @@ impl RingWriter {
             // Wake the reader so it can consume the wrap marker promptly
             self.inner
                 .data_avail
-                .set(EventState::Signaled)
+                .signal()
                 .map_err(|e| IpcError::Event(Box::new(e)))?;
             ring_fail_point!("ring_writer::after_wrap_signal");
 
@@ -426,7 +422,7 @@ impl RingWriter {
         // Signal data available
         self.inner
             .data_avail
-            .set(EventState::Signaled)
+            .signal()
             .map_err(|e| IpcError::Event(Box::new(e)))?;
         ring_fail_point!("ring_writer::after_data_signal");
         Ok(())
@@ -447,8 +443,7 @@ impl RingWriter {
                 Err(IpcError::Full) => {
                     let hdr = unsafe { &*self.inner.hdr };
                     let prior_read = self.last_read;
-                    let wait_timeout =
-                        timeout.map_or_else(|| Timeout::Val(self.poll_interval), Timeout::Val);
+                    let wait_timeout = timeout.or(Some(self.poll_interval));
                     ring_fail_point!("ring_writer::before_space_wait");
                     let wait_res = self.inner.space_avail.wait(wait_timeout);
                     ring_fail_point!("ring_writer::after_space_wait");
@@ -565,10 +560,10 @@ impl RingReader {
             let bump = (self.inner.ring_cap - r) as u64;
             hdr.read.store(read + bump, Ordering::Release);
             ring_fail_point!("ring_reader::after_wrap_read_advance");
-            self.inner
-                .space_avail
-                .set(EventState::Signaled)
-                .map_err(|e| IpcError::Event(Box::new(e)))?;
+        self.inner
+            .space_avail
+            .signal()
+            .map_err(|e| IpcError::Event(Box::new(e)))?;
             ring_fail_point!("ring_reader::after_wrap_space_signal");
             return self.try_pop(out);
         }
@@ -584,7 +579,7 @@ impl RingReader {
         // Signal writer that there is room
         self.inner
             .space_avail
-            .set(EventState::Signaled)
+            .signal()
             .map_err(|e| IpcError::Event(Box::new(e)))?;
         ring_fail_point!("ring_reader::after_space_signal");
         let commit = hdr.commit.load(Ordering::Acquire);
@@ -612,8 +607,7 @@ impl RingReader {
                 continue;
             }
 
-            let wait_timeout =
-                timeout.map_or_else(|| Timeout::Val(self.poll_interval), Timeout::Val);
+            let wait_timeout = timeout.or(Some(self.poll_interval));
             ring_fail_point!("ring_reader::before_data_wait");
             let wait_res = self.inner.data_avail.wait(wait_timeout);
             ring_fail_point!("ring_reader::after_data_wait");

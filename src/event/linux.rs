@@ -1,6 +1,7 @@
-use super::{EventError, EventState, Timeout};
+use super::EventError;
 use std::io;
 use std::mem::size_of;
+use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -21,8 +22,7 @@ impl ManualResetEvent {
         size_of::<EventMem>()
     }
 
-    #[allow(clippy::unnecessary_wraps)]
-    pub unsafe fn new(ptr: *mut u8, _manual_reset: bool) -> Result<(Self, usize), EventError> {
+    pub unsafe fn new(ptr: *mut u8, _manual_reset: bool) -> (Self, usize) {
         let mem = ptr.cast::<EventMem>();
         ptr::write(
             mem,
@@ -30,13 +30,12 @@ impl ManualResetEvent {
                 state: AtomicU32::new(0),
             },
         );
-        Ok((Self { mem }, size_of::<EventMem>()))
+        (Self { mem }, size_of::<EventMem>())
     }
 
-    #[allow(clippy::unnecessary_wraps)]
-    pub unsafe fn from_existing(ptr: *mut u8) -> Result<(Self, usize), EventError> {
+    pub unsafe fn from_existing(ptr: *mut u8) -> (Self, usize) {
         let mem = ptr.cast::<EventMem>();
-        Ok((Self { mem }, size_of::<EventMem>()))
+        (Self { mem }, size_of::<EventMem>())
     }
 
     #[inline]
@@ -44,50 +43,31 @@ impl ManualResetEvent {
         unsafe { &(*self.mem).state }
     }
 
-    pub fn set(&self, state: EventState) -> Result<(), EventError> {
-        match state {
-            EventState::Clear => {
-                self.state().store(0, Ordering::Release);
-            }
-            EventState::Signaled => {
-                self.state().store(1, Ordering::Release);
-                futex_wake(self.state(), i32::MAX)?;
-            }
-        }
-        Ok(())
+    pub fn signal(&self) -> Result<(), EventError> {
+        self.state().store(1, Ordering::Release);
+        futex_wake(self.state(), i32::MAX)
     }
 
-    pub fn wait(&self, timeout: Timeout) -> Result<(), EventError> {
+    pub fn wait(&self, timeout: Option<Duration>) -> Result<(), EventError> {
         loop {
-            if self.state().load(Ordering::Acquire) != 0 {
+            if self.state().swap(0, Ordering::AcqRel) != 0 {
                 return Ok(());
             }
 
-            let futex_timeout = match timeout {
-                Timeout::Infinite => None,
-                Timeout::Val(dur) => Some(dur),
-            };
-
-            match futex_wait(self.state(), futex_timeout) {
-                Ok(()) | Err(WaitResult::Awoken) => {}
-                Err(WaitResult::Timeout) => return Err(EventError::Timeout),
-                Err(WaitResult::Io(err)) => return Err(EventError::Io(err)),
+            match futex_wait(self.state(), timeout) {
+                Ok(()) => {}
+                Err(EventError::Timeout) => return Err(EventError::Timeout),
+                Err(EventError::Io(err)) => return Err(EventError::Io(err)),
             }
         }
     }
 }
 
-enum WaitResult {
-    Awoken,
-    Timeout,
-    Io(io::Error),
-}
-
-fn futex_wait(word: &AtomicU32, timeout: Option<Duration>) -> Result<(), WaitResult> {
+fn futex_wait(word: &AtomicU32, timeout: Option<Duration>) -> Result<(), EventError> {
     let mut timespec_storage = timeout.map(duration_to_timespec);
     let ts_ptr = timespec_storage
         .as_mut()
-        .map_or(ptr::null_mut(), |ts| std::ptr::from_mut(ts));
+        .map_or(ptr::null_mut(), std::ptr::from_mut);
 
     loop {
         let res = unsafe {
@@ -105,12 +85,15 @@ fn futex_wait(word: &AtomicU32, timeout: Option<Duration>) -> Result<(), WaitRes
         }
 
         let errno = io::Error::last_os_error();
-        match errno.raw_os_error() {
-            Some(libc::EAGAIN) => return Ok(()),
-            Some(libc::EINTR) => continue,
-            Some(libc::ETIMEDOUT) => return Err(WaitResult::Timeout),
-            _ => return Err(WaitResult::Io(errno)),
+        if matches!(errno.raw_os_error(), Some(libc::EINTR)) {
+            continue;
         }
+
+        return match errno.raw_os_error() {
+            Some(libc::EAGAIN) => Ok(()),
+            Some(libc::ETIMEDOUT) => Err(EventError::Timeout),
+            _ => Err(EventError::Io(errno)),
+        };
     }
 }
 
@@ -137,6 +120,7 @@ fn duration_to_timespec(dur: Duration) -> libc::timespec {
     } else {
         secs as libc::time_t
     };
+
     let nanos = dur.subsec_nanos();
     let tv_nsec = if (nanos as u64) > libc::c_long::MAX as u64 {
         libc::c_long::MAX

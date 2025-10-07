@@ -17,29 +17,12 @@ pub use fallback::ManualResetEvent;
 
 use std::error::Error;
 use std::fmt;
-use std::time::Duration;
-
-/// Manual-reset event state.
-#[derive(Clone, Copy, Debug)]
-pub enum EventState {
-    #[allow(dead_code)]
-    Clear,
-    Signaled,
-}
-
-/// Wait timeout.
-#[derive(Clone, Copy, Debug)]
-pub enum Timeout {
-    #[allow(dead_code)]
-    Infinite,
-    Val(Duration),
-}
 
 /// Event error.
 #[derive(Debug)]
 pub enum EventError {
     Timeout,
-    #[allow(dead_code)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Io(std::io::Error),
 }
 
