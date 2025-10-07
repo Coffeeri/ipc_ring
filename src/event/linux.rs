@@ -2,7 +2,7 @@ use super::{EventError, EventState, Timeout};
 use std::io;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::{ptr, time::Duration};
+use std::time::Duration;
 
 #[repr(C)]
 struct EventMem {
@@ -21,6 +21,7 @@ impl ManualResetEvent {
         size_of::<EventMem>()
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub unsafe fn new(ptr: *mut u8, _manual_reset: bool) -> Result<(Self, usize), EventError> {
         let mem = ptr.cast::<EventMem>();
         ptr::write(
@@ -32,6 +33,7 @@ impl ManualResetEvent {
         Ok((Self { mem }, size_of::<EventMem>()))
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub unsafe fn from_existing(ptr: *mut u8) -> Result<(Self, usize), EventError> {
         let mem = ptr.cast::<EventMem>();
         Ok((Self { mem }, size_of::<EventMem>()))
@@ -67,8 +69,7 @@ impl ManualResetEvent {
             };
 
             match futex_wait(self.state(), futex_timeout) {
-                Ok(()) => continue,
-                Err(WaitResult::Awoken) => continue,
+                Ok(()) | Err(WaitResult::Awoken) => {}
                 Err(WaitResult::Timeout) => return Err(EventError::Timeout),
                 Err(WaitResult::Io(err)) => return Err(EventError::Io(err)),
             }
@@ -86,14 +87,13 @@ fn futex_wait(word: &AtomicU32, timeout: Option<Duration>) -> Result<(), WaitRes
     let mut timespec_storage = timeout.map(duration_to_timespec);
     let ts_ptr = timespec_storage
         .as_mut()
-        .map(|ts| ts as *mut libc::timespec)
-        .unwrap_or(ptr::null_mut());
+        .map_or(ptr::null_mut(), |ts| std::ptr::from_mut(ts));
 
     loop {
         let res = unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                word as *const AtomicU32 as *const u32,
+                std::ptr::from_ref(word).cast::<u32>(),
                 libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
                 0_u32,
                 ts_ptr,
@@ -118,7 +118,7 @@ fn futex_wake(word: &AtomicU32, count: i32) -> Result<(), EventError> {
     let res = unsafe {
         libc::syscall(
             libc::SYS_futex,
-            word as *const AtomicU32 as *const u32,
+            std::ptr::from_ref(word).cast::<u32>(),
             libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
             count,
         )
@@ -131,8 +131,18 @@ fn futex_wake(word: &AtomicU32, count: i32) -> Result<(), EventError> {
 }
 
 fn duration_to_timespec(dur: Duration) -> libc::timespec {
-    libc::timespec {
-        tv_sec: dur.as_secs() as libc::time_t,
-        tv_nsec: dur.subsec_nanos() as libc::c_long,
-    }
+    let secs = dur.as_secs();
+    let tv_sec = if secs > libc::time_t::MAX as u64 {
+        libc::time_t::MAX
+    } else {
+        secs as libc::time_t
+    };
+    let nanos = dur.subsec_nanos();
+    let tv_nsec = if (nanos as u64) > libc::c_long::MAX as u64 {
+        libc::c_long::MAX
+    } else {
+        nanos as libc::c_long
+    };
+
+    libc::timespec { tv_sec, tv_nsec }
 }
