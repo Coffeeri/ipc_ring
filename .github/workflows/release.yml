@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  release:
+    types:
+      - published
 
 env:
   CARGO_TERM_COLOR: always
@@ -87,7 +90,27 @@ jobs:
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Determine publish requirement
+      id: publish_check
+      run: |
+        set -euo pipefail
+        CRATE_NAME="ipc_ring"
+        CRATE_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r ".packages[] | select(.name==\"${CRATE_NAME}\") | .version")
+        PUBLISHED_VERSION=$(curl -sSf "https://crates.io/api/v1/crates/${CRATE_NAME}" | jq -r '.crate.max_version')
+        SHOULD_PUBLISH="true"
+        if [ -z "${PUBLISHED_VERSION}" ] || [ "${PUBLISHED_VERSION}" = "null" ]; then
+          PUBLISHED_VERSION="not-found"
+        elif [ "${CRATE_VERSION}" = "${PUBLISHED_VERSION}" ]; then
+          SHOULD_PUBLISH="false"
+        fi
+        {
+          echo "crate_version=${CRATE_VERSION}"
+          echo "published_version=${PUBLISHED_VERSION}"
+          echo "should_publish=${SHOULD_PUBLISH}"
+        } >> "${GITHUB_OUTPUT}"
+
     - name: Publish to crates.io
+      if: steps.publish_check.outputs.should_publish == 'true'
       run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
