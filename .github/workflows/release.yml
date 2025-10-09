@@ -90,42 +90,7 @@ jobs:
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Determine publish requirement
-      id: publish_check
-      env:
-        CRATE_NAME: ipc_ring
-      run: |
-        set -euo pipefail
-        CRATE_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r ".packages[] | select(.name==\"${CRATE_NAME}\") | .version")
-        SEARCH_OUTPUT=$(mktemp)
-        PUBLISHED_VERSION="not-found"
-        if cargo search "${CRATE_NAME}" --limit 1 > "${SEARCH_OUTPUT}"; then
-          FIRST_LINE=$(head -n 1 "${SEARCH_OUTPUT}")
-          if printf '%s\n' "${FIRST_LINE}" | grep -q "^${CRATE_NAME} "; then
-            PARSED=$(printf '%s\n' "${FIRST_LINE}" | awk -F'"' '{print $2}')
-            if [ -n "${PARSED}" ]; then
-              PUBLISHED_VERSION="${PARSED}"
-            fi
-          fi
-        fi
-        if [ "${PUBLISHED_VERSION}" = "not-found" ]; then
-          PUBLISHED_VERSION=$(curl -sSf -H "User-Agent: ipc-ring-release-workflow (+https://github.com/${{ github.repository }})" \
-            "https://crates.io/api/v1/crates/${CRATE_NAME}" | jq -r '.crate.max_version' || echo "not-found")
-        fi
-        SHOULD_PUBLISH="true"
-        if [ -z "${PUBLISHED_VERSION}" ] || [ "${PUBLISHED_VERSION}" = "null" ]; then
-          PUBLISHED_VERSION="not-found"
-        elif [ "${CRATE_VERSION}" = "${PUBLISHED_VERSION}" ]; then
-          SHOULD_PUBLISH="false"
-        fi
-        {
-          echo "crate_version=${CRATE_VERSION}"
-          echo "published_version=${PUBLISHED_VERSION}"
-          echo "should_publish=${SHOULD_PUBLISH}"
-        } >> "${GITHUB_OUTPUT}"
-
     - name: Publish to crates.io
-      if: steps.publish_check.outputs.should_publish == 'true'
       run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
