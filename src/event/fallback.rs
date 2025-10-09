@@ -1,4 +1,5 @@
 use super::EventError;
+use std::mem::{size_of, MaybeUninit};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,18 +20,20 @@ const SLEEP_STEP: Duration = Duration::from_micros(200);
 
 impl ManualResetEvent {
     pub fn size_of() -> usize {
-        std::mem::size_of::<EventMem>()
+        size_of::<EventMem>()
     }
 
     pub unsafe fn new(ptr: *mut u8, _manual_reset: bool) -> (Self, usize) {
-        let mem = ptr.cast::<EventMem>();
-        std::ptr::write(
-            mem,
-            EventMem {
-                state: AtomicU32::new(0),
+        let slot = ptr.cast::<MaybeUninit<EventMem>>();
+        (*slot).write(EventMem {
+            state: AtomicU32::new(0),
+        });
+        (
+            Self {
+                mem: (*slot).as_mut_ptr(),
             },
-        );
-        (Self { mem }, Self::size_of())
+            Self::size_of(),
+        )
     }
 
     pub unsafe fn from_existing(ptr: *mut u8) -> (Self, usize) {

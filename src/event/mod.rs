@@ -1,9 +1,4 @@
-//! Manual-reset event implementation for shared memory.
-//!
-//! The interface mirrors the subset of `raw_sync::events::Event` required by
-//! the ring implementation: manual reset, cross-process, and wait with an
-//! optional timeout.  Backends are platform-specific; Linux uses futexes,
-//! other Unix platforms fall back to a lightweight polling loop.
+//! Manual-reset event abstraction used by the ring.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -18,7 +13,6 @@ pub use fallback::ManualResetEvent;
 use std::error::Error;
 use std::fmt;
 
-/// Event error.
 #[derive(Debug)]
 pub enum EventError {
     Timeout,
@@ -35,11 +29,4 @@ impl fmt::Display for EventError {
     }
 }
 
-impl Error for EventError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Timeout => None,
-            Self::Io(err) => Some(err),
-        }
-    }
-}
+impl Error for EventError {}

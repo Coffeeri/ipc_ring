@@ -447,25 +447,33 @@ impl RingWriter {
                     ring_fail_point!("ring_writer::before_space_wait");
                     let wait_res = self.inner.space_avail.wait(wait_timeout);
                     ring_fail_point!("ring_writer::after_space_wait");
-
-                    let timed_out = match wait_res {
-                        Ok(()) => false,
-                        Err(EventError::Timeout) => true,
-                        Err(EventError::Io(err)) => return Err(IpcError::Event(Box::new(err))),
-                    };
-
-                    if timed_out && timeout.is_some() {
-                        return Err(IpcError::Timeout);
-                    }
-
-                    let new_read = hdr.read.load(Ordering::Acquire);
-                    if new_read != prior_read {
-                        self.last_read = new_read;
-                        self.stall_since = None;
-                    } else if timeout.is_none() {
-                        let entry = self.stall_since.get_or_insert_with(Instant::now);
-                        if entry.elapsed() >= STALL_DETECT_THRESHOLD {
-                            return Err(IpcError::PeerStalled);
+                    match wait_res {
+                        Ok(()) => {
+                            self.stall_since = None;
+                            let new_read = hdr.read.load(Ordering::Acquire);
+                            if new_read == prior_read {
+                                // nothing to do; loop again
+                            } else {
+                                self.last_read = new_read;
+                            }
+                        }
+                        Err(EventError::Timeout) => {
+                            if timeout.is_some() {
+                                return Err(IpcError::Timeout);
+                            }
+                            let new_read = hdr.read.load(Ordering::Acquire);
+                            if new_read == prior_read {
+                                let entry = self.stall_since.get_or_insert_with(Instant::now);
+                                if entry.elapsed() >= STALL_DETECT_THRESHOLD {
+                                    return Err(IpcError::PeerStalled);
+                                }
+                            } else {
+                                self.last_read = new_read;
+                                self.stall_since = None;
+                            }
+                        }
+                        Err(EventError::Io(err)) => {
+                            return Err(IpcError::Event(Box::new(err)));
                         }
                     }
                 }
