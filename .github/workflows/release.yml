@@ -92,11 +92,26 @@ jobs:
 
     - name: Determine publish requirement
       id: publish_check
+      env:
+        CRATE_NAME: ipc_ring
       run: |
         set -euo pipefail
-        CRATE_NAME="ipc_ring"
         CRATE_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r ".packages[] | select(.name==\"${CRATE_NAME}\") | .version")
-        PUBLISHED_VERSION=$(curl -sSf "https://crates.io/api/v1/crates/${CRATE_NAME}" | jq -r '.crate.max_version')
+        SEARCH_OUTPUT=$(mktemp)
+        PUBLISHED_VERSION="not-found"
+        if cargo search "${CRATE_NAME}" --limit 1 > "${SEARCH_OUTPUT}"; then
+          FIRST_LINE=$(head -n 1 "${SEARCH_OUTPUT}")
+          if printf '%s\n' "${FIRST_LINE}" | grep -q "^${CRATE_NAME} "; then
+            PARSED=$(printf '%s\n' "${FIRST_LINE}" | awk -F'"' '{print $2}')
+            if [ -n "${PARSED}" ]; then
+              PUBLISHED_VERSION="${PARSED}"
+            fi
+          fi
+        fi
+        if [ "${PUBLISHED_VERSION}" = "not-found" ]; then
+          PUBLISHED_VERSION=$(curl -sSf -H "User-Agent: ipc-ring-release-workflow (+https://github.com/${{ github.repository }})" \
+            "https://crates.io/api/v1/crates/${CRATE_NAME}" | jq -r '.crate.max_version' || echo "not-found")
+        fi
         SHOULD_PUBLISH="true"
         if [ -z "${PUBLISHED_VERSION}" ] || [ "${PUBLISHED_VERSION}" = "null" ]; then
           PUBLISHED_VERSION="not-found"
