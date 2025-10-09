@@ -702,6 +702,7 @@ mod tests {
         cleanup_ring(&path);
         let f = fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .read(true)
             .open(&path)
@@ -796,7 +797,9 @@ mod tests {
         // Eventually should fail with Full
         loop {
             match writer.try_push(&msg) {
-                Ok(()) => continue,
+                Ok(()) => {
+                    // Keep attempting to push until the ring reports Full.
+                }
                 Err(IpcError::Full) => break,
                 Err(e) => panic!("Unexpected error: {e:?}"),
             }
@@ -1001,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "cap_pow2.is_power_of_two()")]
     fn test_capacity_not_power_of_two_panics() {
         let path = test_ring_path();
         cleanup_ring(&path);

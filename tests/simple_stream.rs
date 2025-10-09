@@ -52,8 +52,8 @@ fn reader_receives_stream_with_delays() {
     for _ in 0..3 {
         received.push(rx.recv().expect("receive payload"));
     }
-    for (expected, got) in messages.iter().zip(received.iter()) {
-        assert_eq!(expected.as_ref(), got.as_slice());
+    for (expected, got) in messages.iter().zip(&received) {
+        assert_eq!(*expected, got.as_slice());
     }
 
     cleanup(&path);

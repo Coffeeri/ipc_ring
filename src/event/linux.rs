@@ -64,16 +64,16 @@ impl ManualResetEvent {
 }
 
 fn futex_wait(word: &AtomicU32, timeout: Option<Duration>) -> Result<(), EventError> {
-    let mut timespec_storage = timeout.map(duration_to_timespec);
+    let timespec_storage = timeout.map(duration_to_timespec);
     let ts_ptr = timespec_storage
-        .as_mut()
-        .map_or(std::ptr::null::<libc::timespec>(), |ts| ts as *mut _);
+        .as_ref()
+        .map_or(std::ptr::null::<libc::timespec>(), std::ptr::from_ref);
 
     loop {
         let res = unsafe {
             libc::syscall(
                 libc::SYS_futex,
-                word as *const AtomicU32 as *const u32,
+                std::ptr::from_ref(word).cast::<u32>(),
                 libc::FUTEX_WAIT,
                 0_u32,
                 ts_ptr,
@@ -86,7 +86,9 @@ fn futex_wait(word: &AtomicU32, timeout: Option<Duration>) -> Result<(), EventEr
         let errno = io::Error::last_os_error();
         match errno.raw_os_error() {
             Some(libc::EAGAIN) => return Ok(()),
-            Some(libc::EINTR) => continue,
+            Some(libc::EINTR) => {
+                // Retry loop when interrupted.
+            }
             Some(libc::ETIMEDOUT) => return Err(EventError::Timeout),
             _ => return Err(EventError::Io(errno)),
         }
@@ -97,7 +99,7 @@ fn futex_wake(word: &AtomicU32, count: i32) -> Result<(), EventError> {
     let res = unsafe {
         libc::syscall(
             libc::SYS_futex,
-            word as *const AtomicU32 as *const u32,
+            std::ptr::from_ref(word).cast::<u32>(),
             libc::FUTEX_WAKE,
             count,
         )
@@ -111,16 +113,15 @@ fn futex_wake(word: &AtomicU32, count: i32) -> Result<(), EventError> {
 
 fn duration_to_timespec(dur: Duration) -> libc::timespec {
     let secs = dur.as_secs();
-    let tv_sec = if secs > libc::time_t::MAX as u64 {
-        libc::time_t::MAX
-    } else {
-        secs as libc::time_t
-    };
-    let nanos = dur.subsec_nanos() as u64;
-    let tv_nsec = if nanos > libc::c_long::MAX as u64 {
+    let seconds = libc::time_t::try_from(secs).unwrap_or(libc::time_t::MAX);
+    let nanos = u64::from(dur.subsec_nanos());
+    let nanos_clamped = if nanos > libc::c_long::MAX as u64 {
         libc::c_long::MAX
     } else {
-        nanos as libc::c_long
+        libc::c_long::try_from(nanos).unwrap_or(libc::c_long::MAX)
     };
-    libc::timespec { tv_sec, tv_nsec }
+    libc::timespec {
+        tv_sec: seconds,
+        tv_nsec: nanos_clamped,
+    }
 }
