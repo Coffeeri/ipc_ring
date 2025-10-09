@@ -16,8 +16,8 @@ categories = ["os", "concurrency", "memory-management"]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 memmap2   = "0.9"
-raw_sync  = "0.1"
 thiserror = "1"
+libc = "0.2"
 
 [dependencies.fail]
 version = "0.5"

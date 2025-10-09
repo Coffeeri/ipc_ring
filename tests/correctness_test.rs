@@ -56,8 +56,8 @@ fn test_streaming_correctness_small_capacity() {
     for i in 0..messages {
         payload[0..8].copy_from_slice(&(i as u64).to_le_bytes());
         // Fill remainder with a pattern (optional correctness)
-        for j in 8..payload.len() {
-            payload[j] = (j & 0xFF) as u8;
+        for (idx, byte) in payload.iter_mut().enumerate().skip(8) {
+            *byte = (idx & 0xFF) as u8;
         }
         writer.push(&payload, Some(op_timeout)).expect("push ok");
     }
