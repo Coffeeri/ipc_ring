@@ -27,6 +27,7 @@ use thiserror::Error;
 
 const MAGIC: u64 = 0x4950_4352_494E_4731; // "IPCRING1"
 const READY: u32 = 1 << 31;
+const MAX_MSG_LEN: usize = (1 << 31) - 1; // reserve 31 bits for length and one bit for READY flag
 const HDR_ALIGN: usize = 64;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 2;
 const STALL_DETECT_THRESHOLD: Duration = Duration::from_millis(500);
@@ -351,7 +352,7 @@ impl RingWriter {
     /// - Message is too large for the ring buffer  
     /// - Ring buffer is full
     pub fn try_push(&mut self, payload: &[u8]) -> Result<(), IpcError> {
-        if payload.len() + 4 > self.inner.ring_cap {
+        if payload.len() > MAX_MSG_LEN || payload.len() + 4 > self.inner.ring_cap {
             return Err(IpcError::TooLarge);
         }
 
@@ -1034,6 +1035,56 @@ mod tests {
             assert!(n.is_some());
             let expected = format!("message_{i}");
             assert_eq!(&buf[..], expected.as_bytes());
+        }
+
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_payload_max_u32_len() {
+        let path = test_ring_path();
+        cleanup_ring(&path);
+
+        // 8GB ring (1 << 33) to ensure capacity isn't the limiting factor.
+        let cap = 1usize << 33;
+        let writer_res = RingWriter::create(&path, cap);
+
+        if let Ok(mut writer) = writer_res {
+            // Create a fake slice of length u32::MAX.
+            // SAFETY: Dangling pointer, but we expect try_push to fail before reading.
+            let len = u32::MAX as usize;
+            let fake_ptr = std::ptr::NonNull::dangling().as_ptr();
+            let payload = unsafe { slice::from_raw_parts(fake_ptr, len) };
+
+            let err = writer.try_push(payload);
+            assert!(matches!(err, Err(IpcError::TooLarge)));
+        } else {
+            println!("Skipping 8GB ring test due to resource limits");
+        }
+
+        cleanup_ring(&path);
+    }
+
+    #[test]
+    fn test_payload_exceeds_max_msg_len() {
+        let path = test_ring_path();
+        cleanup_ring(&path);
+
+        // 4GB ring (1 << 32).
+        let cap = 1usize << 32;
+        let writer_res = RingWriter::create(&path, cap);
+
+        if let Ok(mut writer) = writer_res {
+            // Create a fake slice of length 1<<31.
+            // SAFETY: Dangling pointer, but we expect try_push to fail before reading.
+            let len = 1usize << 31; // Sets the high bit (READY bit collision)
+            let fake_ptr = std::ptr::NonNull::dangling().as_ptr();
+            let payload = unsafe { slice::from_raw_parts(fake_ptr, len) };
+
+            let err = writer.try_push(payload);
+            assert!(matches!(err, Err(IpcError::TooLarge)));
+        } else {
+            println!("Skipping 4GB ring test due to resource limits");
         }
 
         cleanup_ring(&path);
