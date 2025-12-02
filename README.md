@@ -4,19 +4,27 @@ Memory-mapped SPSC ring buffer for high-performance inter-process communication 
 
 ## Performance
 
-**MacBook Pro 2021 M1 Pro, 32GB RAM, 1TB NVMe**: 16.3M msgs/s, 3.9 GiB/s (256B messages)
-
-```
-{"messages":1000000,"msg_size":256,"elapsed_sec":0.061254,"msgs_per_sec":16325531,"MiB_per_sec":3985.73}
-```
+**MacBook Pro 2021 M1 Pro, 32GB RAM, 1TB NVMe**  
+- `cap=64 MiB`: 14.6M msgs/s, 3.5 GiB/s (256B messages)  
+  ```
+  {"messages":1000000,"msg_size":256,"elapsed_sec":0.068287,"msgs_per_sec":14644147,"MiB_per_sec":3575.23}
+  ```
+- `cap=8 MiB`: 10.5M msgs/s, 2.5 GiB/s (256B messages)  
+  ```
+  {"messages":1000000,"msg_size":256,"elapsed_sec":0.095021,"msgs_per_sec":10523999,"MiB_per_sec":2569.34}
+  ```
+- `cap=1 MiB` (heavy wrap pressure, higher message count): 12.3M msgs/s, 3.0 GiB/s (256B messages)  
+  ```
+  {"messages":5000000,"msg_size":256,"elapsed_sec":0.407814,"msgs_per_sec":12260504,"MiB_per_sec":2993.29}
+  ```
 
 ### Benchmark Comparison
 
-Tested against [ipmpsc](https://github.com/dicej/ipmpsc) (serialized MPSC ring buffer) using 1M messages, 256-byte payloads, 64MB ring capacity on `/tmp` filesystem:
+Tested against [ipmpsc](https://github.com/dicej/ipmpsc) (serialized MPSC ring buffer) using 1M messages, 256-byte payloads, **64MB ring capacity** on `/tmp` filesystem:
 
 | Library | Messages/sec | Throughput | Ratio |
 |---------|-------------|-----------|-------|
-| **ipc_ring** | 16.3M | 3.9 GiB/s | **20.6x** |
+| **ipc_ring** | 14.6M | 3.5 GiB/s | **18.5x** |
 | **ipmpsc** | 791K | 193 MiB/s | 1x |
 
 **Use ipc_ring when:**
@@ -57,7 +65,14 @@ let n = reader.pop(&mut buf, None)?;  // None = block until data
 ## Benchmark
 
 ```bash
-cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 67108864
+# 64 MiB ring (matches comparison table)
+cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 67108864 --messages 1000000 --msg-size 256
+
+# 8 MiB ring (more wrap pressure)
+cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 8388608 --messages 1000000 --msg-size 256
+
+# 1 MiB ring (heavy wrap pressure, higher message count)
+cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 1048576 --messages 5000000 --msg-size 256
 ```
 
 ## Technical
