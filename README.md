@@ -17,6 +17,10 @@ Memory-mapped SPSC ring buffer for high-performance inter-process communication 
   ```
   {"messages":5000000,"msg_size":256,"elapsed_sec":0.407814,"msgs_per_sec":12260504,"MiB_per_sec":2993.29}
   ```
+- `cap=1 MiB` (heavy wrap pressure, 500M messages): 12.6M msgs/s, 3.1 GiB/s (256B messages)  
+  ```
+  {"messages":500000000,"msg_size":256,"elapsed_sec":39.682753,"msgs_per_sec":12599932,"MiB_per_sec":3076.16}
+  ```
 
 ### Benchmark Comparison
 
@@ -73,6 +77,9 @@ cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 8388608 --mes
 
 # 1 MiB ring (heavy wrap pressure, higher message count)
 cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 1048576 --messages 5000000 --msg-size 256
+
+# 1 MiB ring (heavy wrap pressure, 500M messages)
+cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 1048576 --messages 500000000 --msg-size 256
 ```
 
 ## Technical
