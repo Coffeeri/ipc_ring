@@ -88,7 +88,7 @@ cargo run --release --bin ipc_bench -- --ring /dev/shm/bench --cap 1048576 --mes
 - **Lock-free**: Atomic operations, no mutexes
 - **mmap-backed**: Shared memory via file mapping
 - **Power-of-two capacity**: Required for efficient masking
-- **Unix-only**: Linux, macOS (uses raw_sync events)
+- **Unix-only**: Linux + macOS/other Unix (manual-reset events; futex-backed on Linux, spin/sleep poller on macOS)
 
 ## Requirements
 
